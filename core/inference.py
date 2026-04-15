@@ -6,13 +6,134 @@ This module isolates the "heavy machinery" of answer generation from the
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import logging
+import re
 import time
 from collections.abc import Iterator, Sequence
 from typing import Any, Optional
 
 from core.constants import Constants
+
+logger = logging.getLogger("lorekeeper.inference")
+
+_CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _compact_raw_snippet(text: str, *, limit: int = 1200) -> str:
+    """Return a compact snippet of potentially-long raw model output.
+
+    Args:
+        text: Raw content to summarize.
+        limit: Max total characters returned.
+
+    Returns:
+        A snippet that preserves both prefix and suffix when long.
+    """
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return raw
+    head = raw[: int(limit * 0.7)].rstrip()
+    tail = raw[-int(limit * 0.3) :].lstrip()
+    return f"{head}\n… <snip {len(raw) - len(head) - len(tail)} chars> …\n{tail}"
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    """Extract the first balanced JSON object substring from arbitrary text.
+
+    Intent:
+        Some models wrap JSON in markdown fences or prepend/append prose. This
+        function attempts to recover the first `{...}` region with balanced
+        braces so we can still parse the verdict.
+
+    Args:
+        text: Raw model output.
+
+    Returns:
+        JSON object substring including braces, or None if not found.
+    """
+    s = str(text or "")
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
+
+
+def _parse_critic_payload(text: str) -> tuple[Optional[str], list[str], str]:
+    """Parse the hidden critic payload from raw LLM output.
+
+    Args:
+        text: Raw critic output (ideally JSON).
+
+    Returns:
+        (`verdict`, `issues`, `fix_instruction`) where verdict may be None when
+        extraction fails.
+    """
+    txt = _CODE_FENCE_RE.sub("", str(text or "")).strip()
+
+    candidates: list[str] = []
+    if txt:
+        candidates.append(txt)
+    extracted = _extract_first_json_object(txt)
+    if extracted and extracted not in candidates:
+        candidates.append(extracted)
+
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            obj = None
+
+        if isinstance(obj, dict):
+            verdict = obj.get("verdict")
+            issues = obj.get("issues", [])
+            fix_instruction = obj.get("fix_instruction")
+            return (
+                (str(verdict).strip().lower() if verdict is not None else None),
+                [str(x) for x in issues] if isinstance(issues, list) else [str(issues)],
+                str(fix_instruction or "").strip(),
+            )
+
+        # Some backends stringify dicts with single quotes (Python repr). Try safely.
+        try:
+            py_obj = ast.literal_eval(cand)
+        except Exception:
+            py_obj = None
+        if isinstance(py_obj, dict):
+            verdict = py_obj.get("verdict")
+            issues = py_obj.get("issues", [])
+            fix_instruction = py_obj.get("fix_instruction")
+            return (
+                (str(verdict).strip().lower() if verdict is not None else None),
+                [str(x) for x in issues] if isinstance(issues, list) else [str(issues)],
+                str(fix_instruction or "").strip(),
+            )
+
+    return None, [], ""
 
 
 def invoke_answer_chain(
@@ -46,27 +167,58 @@ def run_hidden_critic(
     Returns:
         (`passed`, `notes`) where `passed=False` means one retry is required.
     """
-    critic_prompt = Constants.CRITIC_PROMPT_TEMPLATE.format(
-        query=query,
-        context_text=context_text,
-        candidate_answer=candidate_answer,
-    )
-    raw = llm.invoke(critic_prompt)
-    content = getattr(raw, "content", raw)
-    txt = str(content or "").strip()
     try:
-        obj = json.loads(txt)
-        verdict = str(obj.get("verdict", "")).strip().lower()
-        issues = obj.get("issues", [])
+        critic_prompt = Constants.CRITIC_PROMPT_TEMPLATE.format(
+            query=query,
+            context_text=context_text,
+            candidate_answer=candidate_answer,
+        )
+        raw = llm.invoke(critic_prompt)
+        content = getattr(raw, "content", raw)
+        txt = str(content or "").strip()
+
+        verdict, issues, fix_instruction = _parse_critic_payload(txt)
+
+        # Normalize verdict to a small, stable state machine: pass|fail|unknown.
+        verdict_norm = (verdict or "").strip().lower()
+        if verdict_norm not in {"pass", "fail"}:
+            lowered = txt.lower()
+            if '"verdict":"pass"' in lowered or "verdict: pass" in lowered:
+                verdict_norm = "pass"
+            elif '"verdict":"fail"' in lowered or "verdict: fail" in lowered:
+                verdict_norm = "fail"
+            elif "pass" in lowered and "fail" not in lowered:
+                verdict_norm = "pass"
+            elif "fail" in lowered and "pass" not in lowered:
+                verdict_norm = "fail"
+            else:
+                verdict_norm = "unknown"
+
         issue_text = "; ".join(str(x) for x in issues if str(x).strip())[:800]
-        fix_instruction = str(obj.get("fix_instruction", "")).strip()
-        notes = fix_instruction or issue_text or "Potential grounding mismatch."
-        return verdict == "pass", notes
-    except Exception:
-        lowered = txt.lower()
-        if '"verdict":"pass"' in lowered or "verdict: pass" in lowered:
+        notes = (fix_instruction or issue_text or "Potential grounding mismatch.").strip()
+
+        if verdict_norm == "pass":
             return True, ""
-        return False, txt[:800] or "Potential grounding mismatch."
+        if verdict_norm == "fail":
+            return False, notes
+
+        # Fallback policy: never hard-fault on malformed critic output.
+        # Defaulting to PASS avoids a secondary corrective call chain when the critic
+        # hallucinated its format.
+        logger.warning(
+            "Hidden critic produced malformed payload; defaulting verdict=pass. "
+            "raw_len=%d raw_snippet=%r",
+            len(txt),
+            _compact_raw_snippet(txt),
+        )
+        return True, ""
+    except Exception as exc:
+        logger.exception(
+            "Hidden critic crashed; defaulting verdict=pass (%s). raw_snippet=%r",
+            exc,
+            _compact_raw_snippet(str(locals().get("txt", ""))),
+        )
+        return True, ""
 
 
 def generate_with_self_correction(

@@ -5,17 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [2.1.0] - 2026-04-15
+## [2.1.2] - 2026-04-16
 
-### GPU / Runtime
+### RAG Engine
 
-- **GPU preload reliability**: Fixed Ollama VRAM prewarm so GPU activation resolves automatically without needing a failed run + manual **Restart Engine**. Root cause was an invalid `/api/generate` payload (missing `prompt`) that could fail silently; warmup now sends a valid request and retries with backoff until `/api/ps` confirms `size_vram > 0` (or times out).
+- **Critic verdict hardening**: Hidden-critic parsing now tolerates markdown fences and Python-dict reprs and defaults to `pass` when `verdict` is missing/malformed, preventing hard faults during the self-correction loop.
+- **Critique observability**: Added warning/exception logs capturing compact raw critic-response snippets (prefix+suffix) on parse failures so verdict extraction breakages are diagnosable.
 
 ## [2.1.1] - 2026-04-15
 
 ### GPU / Runtime
 
 - **Non-blocking GPU prewarm**: Moved Ollama VRAM prewarm into a dedicated background thread per session so engine warmup completion is never delayed by GPU activation. GPU progress is tracked via `st.session_state.gpu_status` (`warming` → `active`), and the thread triggers a rerun once `/api/ps` confirms `size_vram > 0` so the sidebar flips to 🟢 automatically.
+
+## [2.1.0] - 2026-04-15
+
+### GPU / Runtime
+
+- **GPU preload reliability**: Fixed Ollama VRAM prewarm so GPU activation resolves automatically without needing a failed run + manual **Restart Engine**. Root cause was an invalid `/api/generate` payload (missing `prompt`) that could fail silently; warmup now sends a valid request and retries with backoff until `/api/ps` confirms `size_vram > 0` (or times out).
 
 ## [2.0.9] - 2026-04-15
 
