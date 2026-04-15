@@ -56,20 +56,25 @@ cd LoreKeeper-DND-Hybrid-RAG-Core
 
 # Run the automated setup
 bash setup.sh
+```
+### **3. Running the Application**
+bash ```streamlit run app.py```
 
-# **3. Running the Application**
-```bash streamlit run app.py
 
-### **📈 Why Dungeons & Dragons?**
+---
+
+## **📈 Why Dungeons & Dragons?**
 D&D 5e serves as the ultimate stress test for RAG systems due to:
 
-High Data Density: Hundreds of interconnected rules across multiple books.
+* High Data Density: Hundreds of interconnected rules across multiple books.
 
-Specific Jargon: Terms that mean different things in common English vs. Game Mechanics.
+* Specific Jargon: Terms that mean different things in common English vs. Game Mechanics.
 
-Complex Retrieval: Needs to understand the difference between "Flavor Text" and "Rule Constraint."
+* Complex Retrieval: Needs to understand the difference between "Flavor Text" and "Rule Constraint."
 
-### **📜 License**
-Distributed under the MIT License. See LICENSE for more information.
+---
+
+## **📜 License**
+Distributed under the **MIT License**. See [LICENSE](https://github.com/AsafNachman/LoreKeeper-DND-Hybrid-RAG-Core/blob/main/License) for more information.
 
 Contact: Asaf Nachman - Computer Science Student (97 GPA) | Applied AI & AI Infrastructure Enthusiast.
