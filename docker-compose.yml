@@ -1,0 +1,127 @@
+# Chroma (`db`) and uploads (`data`) use **named volumes** so persistence stays on the
+# Linux VM filesystem — avoids the slow WSL2 ↔ Windows bind-mount bridge for heavy I/O.
+# Runtime bind mounts are file-scoped (no full `.:/app`) to avoid scanning host `venv/`
+# over the WSL2 bridge while still allowing live edits for app modules.
+#
+# Requires .env with OPENAI_API_KEY. If `storage/chat_history.json` is missing on the host, create it first:
+#   PowerShell: New-Item -Force storage | Out-Null; Set-Content storage/chat_history.json '[]'
+#   bash:       mkdir -p storage && echo '[]' > storage/chat_history.json
+#
+# Containers / images:
+#   docker compose up -d              — start using existing image (no rebuild)
+#   docker compose up -d --build      — rebuild image, then start
+#   docker compose down --remove-orphans  — drop old containers (e.g. renamed service lorekeeper)
+#
+# Phoenix UI: http://localhost:6006  — traces from Lore Keeper when PHOENIX_COLLECTOR_ENDPOINT is set.
+# Ollama API: http://localhost:11434  — the `ollama` service starts `ollama serve`, then runs
+# `ollama pull` in the background into the persistent `ollama_data` volume (separate from host Ollama).
+# Override the pulled tag with OLLAMA_PULL_MODEL (defaults to llama3:8b-instruct-q4_K_M; align with OLLAMA_CHAT_MODEL).
+# NVIDIA GPU: requires the NVIDIA Container Toolkit on the host. NVIDIA_VISIBLE_DEVICES=all and
+# NVIDIA_DRIVER_CAPABILITIES=compute,utility are set on the ollama service so the runtime exposes
+# all GPUs with the minimum required driver capabilities (compute for CUDA kernels, utility for
+# nvidia-smi). Set OLLAMA_NUM_GPU=1 in `.env` for the **lore-keeper** service so `ChatOllama`
+# requests GPU layers; use OLLAMA_NUM_GPU=0 if no GPU is available.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_PULL_MODEL: ${OLLAMA_PULL_MODEL:-llama3:8b-instruct-q4_K_M}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      OLLAMA_KEEP_ALIVE: "-1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        SERVE_PID=$$!
+        i=0
+        while [ $$i -lt 60 ]; do
+          if ollama list >/dev/null 2>&1; then break; fi
+          i=$$((i+1))
+          sleep 1
+        done
+        ollama pull "$${OLLAMA_PULL_MODEL:-llama3:8b-instruct-q4_K_M}" &
+        wait $$SERVE_PID
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    ports:
+      - "6006:6006"
+    environment:
+      - PHOENIX_WORKING_DIR=/phoenix/data
+    volumes:
+      - phoenix-data:/phoenix/data
+    restart: unless-stopped
+
+  lore-keeper:
+    image: dnd-lorekeeper:latest
+    build: .
+    container_name: lore-keeper
+    ports:
+      - "8501:8501"
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "500"
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+      PHOENIX_PROJECT_NAME: dnd-lorekeeper
+      HEALTH_PORT: "8080"
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-llama3:8b-instruct-q4_K_M}
+    volumes:
+      - ./app.py:/app/app.py
+      - ./main.py:/app/main.py
+      - ./ingest.py:/app/ingest.py
+      - ./services/health_server.py:/app/services/health_server.py
+      - ./services/observability.py:/app/services/observability.py
+      - ./core:/app/core
+      - ./VERSION:/app/VERSION
+      - ./db:/app/db
+      - ./data:/app/data
+      - ./storage:/app/storage
+    depends_on:
+      ollama:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    healthcheck:
+      # Streamlit server is up; first script run may still warm `LoreKeeper` via st.cache_resource.
+      test:
+        [
+          "CMD",
+          "curl",
+          "-sf",
+          "http://127.0.0.1:8501/_stcore/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  phoenix-data:
+  ollama_data:

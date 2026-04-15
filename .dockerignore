@@ -1,0 +1,66 @@
+# Virtual environment and Python bytecode
+venv/
+.venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-wheel-metadata/
+
+# Git, IDEs, and AI local tooling
+.git/
+**/.git/
+.github/
+.gitignore
+.cursor/
+.vscode/
+.idea/
+*.code-workspace
+.agent/
+**/agent-transcripts/
+.cursorrules
+
+# Local runtime data (handled via Docker Compose mounts)
+db/
+data/
+storage/
+*.pdf
+
+# Documentation, improvement logs, and patches
+scripts/
+!scripts/docker-entrypoint.sh
+tmp_patch_*.py
+*.md
+
+# Development, testing, and CI artifacts
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+eval_rag.py
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# Secrets (managed via environment files)
+.env
+.env.*
+!.env.example
+
+# Operating System and Editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+*~
+
+# Logs and temporary files
+*.log
+tmp/
+temp/

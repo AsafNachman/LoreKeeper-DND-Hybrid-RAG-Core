@@ -1,0 +1,17 @@
+# API Keys & Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Databases & Data (Local only)
+db/
+data/ingested_lore/
+storage/*.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,36 @@
+# Core AI & RAG (LangChain + vector store)
+langchain-core
+langchain-community
+langchain-classic           # EnsembleRetriever, ContextualCompressionRetriever
+langchain-openai            # ChatOpenAI, OpenAIEmbeddings
+langchain-ollama            # ChatOllama (efficiency tier in main.get_llm_engine)
+langchain-chroma            # Chroma vector store
+langchain-text-splitters    # RecursiveCharacterTextSplitter
+
+# Retrieval, reranking, and loaders
+flashrank                   # FlashrankRerank
+rank-bm25                   # BM25Retriever
+pypdf                       # PyPDFLoader PDF parsing
+
+# Web Interface
+streamlit
+
+# Utils & Configuration
+python-dotenv               # load_dotenv
+
+# Evaluation (RAGAS)
+ragas>=0.4.0
+datasets>=4.0.0
+pandas>=2.0.0               # ragas EvaluationResult.to_pandas()
+
+# Observability (optional — set PHOENIX_COLLECTOR_ENDPOINT)
+arize-phoenix>=4.0.0
+openinference-instrumentation-langchain>=0.1.0
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+
+# Note: top-level package "langchain" is omitted on purpose — this app imports
+# only langchain_* subpackages; pip resolves a consistent tree without it.
+#
+# Docker: multi-stage Dockerfile installs `requirements.lock` with uv (fast, reproducible).
+# Refresh the lock after changing this file:  pip freeze > requirements.lock

@@ -1,0 +1,2 @@
+# Shell scripts must stay LF so Linux containers don't get a broken shebang (exec: no such file).
+*.sh text eol=lf

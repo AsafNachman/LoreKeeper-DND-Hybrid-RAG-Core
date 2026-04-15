@@ -1,0 +1,42 @@
+# Lore Keeper: Core Engineering & Versioning Rules
+
+## 1. Professional Documentation
+- Use Google-style Docstrings (Args, Returns, Intent).
+- Use Plain Markdown for all documentation and comments.
+- Reference code with single backticks `like_this`.
+- STRICTLY PROHIBITED: Sphinx/reST syntax (no :mod:, :func:, :class:, or double backticks).
+- Focus comments on the "Why" (intent) and "Logic" (reasoning), not just the "What".
+
+## 2. Versioning Governance (SemVer)
+- The project follows Semantic Versioning (MAJOR.MINOR.PATCH).
+- Mandatory update of the `VERSION` file and `CHANGELOG.md` after every task.
+- Version Increments:
+    - PATCH: Bug fixes, minor refactors, documentation tweaks.
+    - MINOR: New features, infrastructure upgrades (Docker, Async, RAG logic).
+    - MAJOR: Breaking changes or total architectural shifts.
+
+## 3. Changelog Discipline (Balanced Style)
+- Group entries by high-level technical modules (e.g., **Docker**, **Async**, **RAG Engine**).
+- Under each module, use 2-4 concise bullet points max.
+- Format: "- **Module**: High-level summary of the change and its value."
+- Keep the overall length of a version entry to a single screen view.
+
+## 4. Technical Standards
+- Async-first: Prioritize `asyncio` for all I/O-bound operations (API calls, DB queries).
+- Type Hinting: Every function signature must have clear Python Type Hints.
+- Docker: Maintain a clean separation between build and runtime layers.
+
+## 5. Learning Debt Management
+- Maintain `docs/LEARNING_DEBT.md`.
+- **Historical table:** Keep the curated **Concepts (project history)** table accurate when renaming or replacing major ideas (rare).
+- **Task log:** After every task, append **one row** to **Task log (append-only)** with: date, version, short theme, and 1–3 new or emphasized concepts (libraries, patterns, infra). Match the existing column style.
+- If a concept is both new and generally useful long-term, you may also add a single row to the historical table in a follow-up edit (optional).
+
+## 6. Definition of Done
+- A task is NOT complete until:
+    1. The code is implemented and verified.
+    2. Docstrings are updated (Plain Markdown).
+    3. The `VERSION` file is incremented.
+    4. The `CHANGELOG.md` is updated using **Balanced Style**.
+    5. New concepts are appended to the **Task log** in `docs/LEARNING_DEBT.md` (and the historical table updated when appropriate).
+- Do not ask for permission to update these files; it is a mandatory part of your workflow.
