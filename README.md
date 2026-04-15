@@ -51,7 +51,7 @@ This project was developed over **10 days of rapid iteration**, moving from a mo
 We've included a developer-experience (DX) script to set up your environment instantly:
 ```bash
 # Clone the repository
-git clone [https://github.com/AsafNachman/LoreKeeper-DND-Hybrid-RAG-Core.git](https://github.com/AsafNachman/LoreKeeper-DND-Hybrid-RAG-Core.git)
+git clone https://github.com/AsafNachman/LoreKeeper-DND-Hybrid-RAG-Core.git
 cd LoreKeeper-DND-Hybrid-RAG-Core
 
 # Run the automated setup
