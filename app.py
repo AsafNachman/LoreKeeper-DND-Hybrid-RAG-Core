@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import random
 import shutil
 import subprocess
 import threading
@@ -52,19 +53,390 @@ def _read_version() -> str:
         return "2.0.0"
 
 
+_REPO_ROOT = Path(__file__).resolve().parent
+_UI_SETTINGS_PATH = _REPO_ROOT / "storage" / "ui_settings.json"
+
+
+def _normalize_brain_id_for_settings(brain_id: str | None) -> str:
+    """Normalize a brain id for JSON hydration (same rules as `_normalize_brain_id`).
+
+    Args:
+        brain_id: Raw id from disk or user input.
+
+    Returns:
+        Filesystem-safe lowercase id, defaulting to ``dnd_core`` when empty.
+
+    Intent:
+        This helper is defined before the main `_normalize_brain_id` so session
+        hydration can run at import time without forward references.
+    """
+    raw = (brain_id or "").strip().lower()
+    if not raw:
+        return "dnd_core"
+    safe = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in raw).strip("_")
+    return safe or "dnd_core"
+
+
+def _load_ui_settings_dict() -> dict[str, Any]:
+    """Load persisted sidebar settings from ``storage/ui_settings.json`` if present.
+
+    Returns:
+        Parsed JSON object, or an empty dict on missing/invalid files.
+
+    Intent:
+        Full browser refresh clears Streamlit session state; restoring from disk
+        keeps ``llm_mode``, model, brain, and multi-query preferences stable.
+    """
+    try:
+        raw = _UI_SETTINGS_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _coerce_ui_bool(value: Any, *, default: bool = True) -> bool:
+    """Parse JSON or form-like truthy/falsey values for sidebar toggles.
+
+    Args:
+        value: Raw value from ``ui_settings.json`` (bool, int, or string).
+        default: Fallback when the value is unrecognized.
+
+    Returns:
+        A strict boolean suitable for ``multi_query_enabled``.
+
+    Intent:
+        JSON may stringify booleans in some editors; ``bool(\"false\")`` is ``True`` in Python,
+        which would incorrectly force multi-query ON after refresh.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value) and value != 0
+    s = str(value).strip().lower()
+    if s in ("false", "0", "no", "off", ""):
+        return False
+    if s in ("true", "1", "yes", "on"):
+        return True
+    return default
+
+
+def _hydrate_session_from_ui_settings() -> None:
+    """Apply values from ``ui_settings.json`` onto ``st.session_state``.
+
+    Intent:
+        Runs once per browser session (guarded by ``_ui_settings_hydrated``) so
+        widget defaults match the last saved sidebar state after refresh.
+        Applied **before** default session keys so persisted ``multi_query_enabled: false``
+        is not overwritten by Streamlit defaults.
+    """
+    data = _load_ui_settings_dict()
+    lm = data.get("llm_mode")
+    if lm in ("efficiency", "intelligence"):
+        st.session_state.llm_mode = lm
+    bid = data.get("brain_id")
+    if isinstance(bid, str) and bid.strip():
+        st.session_state.brain_id = _normalize_brain_id_for_settings(bid)
+    am = data.get("active_model")
+    if isinstance(am, str) and am.strip():
+        st.session_state.active_model = am.strip()
+    if "multi_query_enabled" in data:
+        st.session_state.multi_query_enabled = _coerce_ui_bool(
+            data["multi_query_enabled"], default=True
+        )
+    if "context_expansion_enabled" in data:
+        st.session_state.context_expansion_enabled = _coerce_ui_bool(
+            data["context_expansion_enabled"], default=False
+        )
+
+
+def _persist_ui_settings_to_disk() -> None:
+    """Write current sidebar-related session keys back to ``ui_settings.json``.
+
+    Intent:
+        Keeps JSON in sync with the sidebar after each rerun so a browser refresh
+        restores the same ``llm_mode``, model, brain, multi-query toggle, and context expansion.
+    """
+    _UI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "llm_mode": st.session_state.get("llm_mode", "efficiency"),
+        "brain_id": st.session_state.get("brain_id", "dnd_core"),
+        "active_model": st.session_state.get("active_model", ""),
+        "multi_query_enabled": bool(st.session_state.get("multi_query_enabled", True)),
+        "context_expansion_enabled": bool(st.session_state.get("context_expansion_enabled", False)),
+    }
+    _UI_SETTINGS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 APP_VERSION = _read_version()
-PRODUCTION_HEADER = "LORE KEEPER v2.0 - Production Ready"
-APP_TITLE = f"{PRODUCTION_HEADER} | v{APP_VERSION}"
+PRODUCTION_HEADER = f"Lore Keeper v{APP_VERSION}"
+APP_TITLE = f"Lore Keeper v{APP_VERSION}"
 GENERAL_KNOWLEDGE_WARNING = "⚠️ NOTE: No verified sources found. Using general knowledge."
+LOW_RELEVANCE_SOFT_WARNING = "I've found relevant records, though they require careful interpretation."
 _SOURCE_TAG_RE = re.compile(r"\[Source:\s*([^|\]]+?)\s*\|\s*Page[^\]]*\]", re.IGNORECASE)
-SUGGESTION_QUESTIONS = [
+SUGGESTION_POOL = [
     "What is a Paladin's Lay on Hands?",
     "Explain Wild Magic Surge",
     "How does multiclassing work?",
+    "What does the *Shield* spell do, exactly?",
+    "How does *Counterspell* work in 5e (including upcasting)?",
+    "What is the difference between advantage and disadvantage?",
+    "What are legendary actions, and when can a monster use them?",
+    "How does concentration work, and what breaks it?",
+    "What is an opportunity attack and when does it trigger?",
+    "How does short rest vs long rest recovery work?",
 ]
+
+_CUSTOM_CSS = """
+<style>
+/* ---------- global ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+:root {
+    --gold:   #d4a843;
+    --parch:  #faf3e0;
+    --ink:    #1e1e1e;
+    --accent: #7b2d26;
+    --muted:  #6b6b6b;
+    --card:   #ffffff;
+    --border: #e0d5c1;
+}
+
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #1a1207 0%, #2a1f0e 100%);
+    min-width: 360px;
+    width: 360px;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, Arial, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.45;
+}
+section[data-testid="stSidebar"] * {
+    color: #e8dcc8 !important;
+}
+
+/* Preserve Streamlit's Material icon font (fixes "keyboard_double_a…" artifacts). */
+section[data-testid="stSidebar"] span[class*="material-symbols"] {
+    font-family: 'Material Symbols Rounded' !important;
+    font-size: 20px !important;
+    line-height: 1 !important;
+}
+
+/* General text elements (avoid forcing font-size on widgets/buttons). */
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] li,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] small,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] .stCaption {
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, Arial, sans-serif !important;
+}
+
+/* ---------- sidebar ---------- */
+.sidebar-brand {
+    text-align: center;
+    padding: 1.2rem 0 0.6rem;
+}
+.sidebar-brand h2 {
+    color: var(--gold) !important;
+    margin: 0;
+    font-size: 1.15rem;
+    letter-spacing: 0.4px;
+    font-weight: 650;
+}
+.sidebar-brand .tagline {
+    font-size: 0.86rem;
+    color: #a89878 !important;
+    margin-top: 2px;
+}
+
+.sidebar-meta {
+    font-size: 0.84rem;
+    line-height: 1.35;
+    padding: 0.25rem 0.1rem 0.6rem;
+}
+.meta-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 2px 0;
+}
+.meta-key {
+    color: #a89878 !important;
+    flex: 0 0 auto;
+}
+.meta-val {
+    flex: 1 1 auto;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.danger-actions [data-testid="stButton"] button {
+    border-radius: 10px !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-secondary"] {
+    border: 1px solid rgba(212,168,67,0.28) !important;
+    background: rgba(255,255,255,0.04) !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-secondary"]:hover {
+    border-color: rgba(212,168,67,0.55) !important;
+    background: rgba(212,168,67,0.08) !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-primary"] {
+    background: #ff4d4d !important;
+    border: 1px solid #ff4d4d !important;
+    color: #1a1207 !important;
+    font-weight: 650 !important;
+}
+
+/* ---------- hero / welcome ---------- */
+.hero {
+    text-align: center;
+    /* Keep the cold-start screen compact so suggestion pills sit near chat input. */
+    padding: 1.8rem 1rem 0.9rem;
+}
+.hero-icon { font-size: 2.4rem; }
+.hero h1 {
+    color: var(--ink);
+    font-size: 2rem;
+    margin: 0.4rem 0 0.3rem;
+}
+.hero p {
+    color: var(--muted);
+    max-width: 460px;
+    margin: 0 auto;
+    font-size: 0.95rem;
+    line-height: 1.55;
+}
+
+/* suggestion blobs — larger "tile" buttons used for quick prompts */
+.suggestion-blobs [data-testid="stButton"] button[data-testid="baseButton-secondary"] {
+    border-radius: 14px !important;
+    font-size: 0.9rem !important;
+    padding: 10px 14px !important;
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(212,168,67,0.35) !important;
+    color: inherit !important;
+    white-space: normal !important;
+    width: 100% !important;
+    min-height: 46px !important;
+}
+.suggestion-blobs [data-testid="stButton"] button[data-testid="baseButton-secondary"]:hover {
+    background: rgba(212,168,67,0.10) !important;
+    border-color: var(--gold) !important;
+}
+.suggestion-blobs [data-testid="stButton"] {
+    width: 100% !important;
+}
+
+/* draft edit bar that replaces st.chat_input when a hint is pending */
+.draft-bar [data-testid="stTextInput"] input {
+    border-radius: 8px !important;
+    font-size: 0.95rem !important;
+}
+
+/* ---------- source expander ---------- */
+.src-item {
+    border-left: 3px solid var(--gold);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    background: rgba(212,168,67,0.07);
+}
+.src-citation {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: inherit;
+    margin-bottom: 4px;
+}
+.src-excerpt {
+    font-size: 0.78rem;
+    opacity: 0.75;
+    font-style: italic;
+    line-height: 1.45;
+    color: inherit;
+}
+.src-item details summary {
+    cursor: pointer;
+    font-size: 0.78rem;
+    opacity: 0.85;
+    margin-top: 4px;
+}
+
+/* ---------- file uploader: shrink only the invalid-file error pill ---------- */
+[data-testid="stFileUploaderFile"] {
+    padding: 4px 8px !important;
+    font-size: 0.75rem !important;
+    line-height: 1.3 !important;
+}
+[data-testid="stFileUploaderFile"] svg {
+    width: 14px !important;
+    height: 14px !important;
+}
+
+/* ---------- management section ---------- */
+.mgmt-header {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #a89878 !important;
+    margin: 0.2rem 0 0.6rem;
+}
+.queued-file {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+    color: #e8dcc8 !important;
+    word-break: break-all;
+}
+
+/* ---------- model tier (Cursor-style selector) ---------- */
+.model-tier-caption {
+    font-size: 0.72rem !important;
+    line-height: 1.4;
+    color: #b8a88c !important;
+    margin: 0.15rem 0 0.85rem;
+    padding: 0 0.15rem;
+}
+section[data-testid="stSidebar"] div[data-testid="stRadio"] label {
+    font-weight: 500 !important;
+    font-size: 0.88rem !important;
+}
+
+/* Consistent vertical rhythm (prevents overlap when fonts scale). */
+section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    margin: 0.35rem 0 0.5rem;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+    padding: 0.35rem 0.15rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stButton"],
+section[data-testid="stSidebar"] [data-testid="stSelectbox"],
+section[data-testid="stSidebar"] [data-testid="stRadio"],
+section[data-testid="stSidebar"] [data-testid="stTextInput"] {
+    margin-bottom: 0.45rem;
+}
+</style>
+"""
 
 # Render the shell immediately; heavy engine work is deferred to warmup threads.
 st.set_page_config(page_title=APP_TITLE, page_icon="\U0001F4DC", layout="centered")
+
+# Disk-backed UI prefs before defaults so toggles like multi_query_enabled survive refresh.
+if "_ui_settings_hydrated" not in st.session_state:
+    _hydrate_session_from_ui_settings()
+    st.session_state._ui_settings_hydrated = True
+
 if "llm_mode" not in st.session_state:
     st.session_state.llm_mode = "efficiency"
 if "edition_filter" not in st.session_state:
@@ -76,11 +448,25 @@ if "active_model" not in st.session_state:
         (os.getenv("OLLAMA_CHAT_MODEL") or "llama3:8b-instruct-q4_K_M").strip()
         or "llama3:8b-instruct-q4_K_M"
     )
+if "multi_query_enabled" not in st.session_state:
+    st.session_state.multi_query_enabled = True
+if "context_expansion_enabled" not in st.session_state:
+    st.session_state.context_expansion_enabled = False
+if "pending_query" not in st.session_state:
+    st.session_state.pending_query = None
+if "pending_draft" not in st.session_state:
+    st.session_state.pending_draft = None
+if "_pending_assistant_query" not in st.session_state:
+    st.session_state._pending_assistant_query = None
+if "suggestion_triplet" not in st.session_state:
+    st.session_state.suggestion_triplet = random.sample(SUGGESTION_POOL, k=3)
+else:
+    cur = list(st.session_state.suggestion_triplet or [])
+    if len(cur) != 3 or any((not isinstance(x, str)) or (not x.strip()) for x in cur):
+        st.session_state.suggestion_triplet = random.sample(SUGGESTION_POOL, k=3)
+
 os.environ["OLLAMA_CHAT_MODEL"] = st.session_state.active_model
-with st.sidebar:
-    _SIDEBAR_BRAND_SLOT = st.empty()
-    _SIDEBAR_STATUS_SLOT = st.empty()
-    _SIDEBAR_STATUS_CAPTION_SLOT = st.empty()
+st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 _MAIN_TITLE_SLOT = st.empty()
 _MAIN_TITLE_SLOT.markdown(f"### \U0001F4DC {PRODUCTION_HEADER}")
 
@@ -416,10 +802,7 @@ def _global_runtime_singleton() -> dict[str, Any]:
         except Exception as exc:
             logger.debug("Runtime preload skipped for %s: %s", mod_name, exc)
 
-    from langchain_classic.retrievers import (
-        ContextualCompressionRetriever,
-        EnsembleRetriever,
-    )
+    from langchain_classic.retrievers import ContextualCompressionRetriever
     from langchain_chroma import Chroma
     from langchain_community.document_compressors import FlashrankRerank
     from langchain_community.retrievers import BM25Retriever
@@ -435,7 +818,6 @@ def _global_runtime_singleton() -> dict[str, Any]:
         Chroma=Chroma,
         ContextualCompressionRetriever=ContextualCompressionRetriever,
         Document=Document,
-        EnsembleRetriever=EnsembleRetriever,
         FlashrankRerank=FlashrankRerank,
         MessagesPlaceholder=MessagesPlaceholder,
         OpenAIEmbeddings=OpenAIEmbeddings,
@@ -1031,7 +1413,7 @@ def _normalize_stored_citation(citation: str) -> str:
     return core_normalize_stored_citation(citation)
 
 
-def _verified_source_html(citation: str, excerpt: str) -> str:
+def _verified_source_html(citation: str, excerpt: str, *, score_label: str = "") -> str:
     """Render one verified source card as safe HTML (collapsible excerpt).
 
     Args:
@@ -1042,6 +1424,7 @@ def _verified_source_html(citation: str, excerpt: str) -> str:
         HTML fragment using `src-item` and `src-excerpt` CSS classes.
     """
     cit_esc = html.escape(citation)
+    score_esc = html.escape(score_label) if score_label else ""
     excerpt_block = ""
     if excerpt:
         ex_esc = html.escape(excerpt)
@@ -1053,7 +1436,7 @@ def _verified_source_html(citation: str, excerpt: str) -> str:
         )
     return (
         f'<div class="src-item">'
-        f'<div class="src-citation">\U0001F4D6 {cit_esc}</div>'
+        f'<div class="src-citation">\U0001F4D6 {cit_esc} {score_esc}</div>'
         f"{excerpt_block}"
         "</div>"
     )
@@ -1070,11 +1453,85 @@ def _render_verified_sources_expander(sources: list[dict[str, Any]] | None) -> N
         if not normalized_sources:
             st.caption("No verified source chunks were retrieved for this answer.")
             return
+        # Compact consecutive pages from the same PDF into a single entry.
+        grouped: list[dict[str, Any]] = []
         for s in normalized_sources:
             raw_citation = s["citation"] if isinstance(s, dict) else str(s)
             citation = _normalize_stored_citation(raw_citation)
             excerpt = s.get("excerpt", "") if isinstance(s, dict) else ""
-            st.markdown(_verified_source_html(citation, excerpt), unsafe_allow_html=True)
+            sim = s.get("similarity_score", None) if isinstance(s, dict) else None
+            rr = s.get("rerank_score", None) if isinstance(s, dict) else None
+
+            m = re.match(r"^(?P<file>.+?)\s+\(Page\s+(?P<page>\d+)\)$", citation)
+            if not m:
+                grouped.append({"citation": citation, "excerpt": excerpt, "file": None, "page": None, "sim": sim, "rr": rr})
+                continue
+            file_ = m.group("file").strip()
+            page = int(m.group("page"))
+            grouped.append({"citation": citation, "excerpt": excerpt, "file": file_, "page": page, "sim": sim, "rr": rr})
+
+        out: list[dict[str, Any]] = []
+        i = 0
+        while i < len(grouped):
+            row = grouped[i]
+            file_, page = row.get("file"), row.get("page")
+            if not file_ or page is None:
+                out.append({"citation": row["citation"], "excerpt": row.get("excerpt", ""), "sim": row.get("sim", None), "rr": row.get("rr", None)})
+                i += 1
+                continue
+            start = page
+            end = page
+            excerpt = row.get("excerpt", "")
+            sim = row.get("sim", None)
+            rr = row.get("rr", None)
+            j = i + 1
+            while j < len(grouped) and grouped[j].get("file") == file_ and isinstance(grouped[j].get("page"), int) and grouped[j]["page"] == end + 1:
+                gj_sim = grouped[j].get("sim", None)
+                gj_rr = grouped[j].get("rr", None)
+                try:
+                    if gj_sim is not None:
+                        sim = max(float(sim or 0.0), float(gj_sim))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    if gj_rr is not None:
+                        rr = max(float(rr or 0.0), float(gj_rr))
+                except (TypeError, ValueError):
+                    pass
+                end = grouped[j]["page"]
+                j += 1
+            if end > start:
+                cit = f"{file_} (Pages {start}–{end})"
+            else:
+                cit = f"{file_} (Page {start})"
+            out.append({"citation": cit, "excerpt": excerpt, "sim": sim, "rr": rr})
+            i = j
+
+        out.sort(
+            key=lambda row: (
+                float(row.get("rr", 0.0) or 0.0),
+                float(row.get("sim", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+
+        for s in out:
+            sim = s.get("sim", None)
+            rr = s.get("rr", None)
+            score_label = ""
+            try:
+                if sim is not None and rr is not None:
+                    score_label = f"[Score: {float(sim):.2f} | Rerank: {float(rr):.2f}]"
+                elif sim is not None:
+                    score_label = f"[Score: {float(sim):.2f}]"
+                elif rr is not None:
+                    score_label = f"[Rerank: {float(rr):.2f}]"
+            except (TypeError, ValueError):
+                score_label = ""
+            st.markdown(
+                _verified_source_html(s["citation"], s.get("excerpt", ""), score_label=score_label),
+                unsafe_allow_html=True,
+            )
 
 
 # ===================================================================
@@ -1113,10 +1570,11 @@ if (not _boot_ready) and _boot_pct < 10 and _boot_key not in _shared_state().get
     time.sleep(0.35)
     st.rerun()
 
-st.markdown("""
+_LEGACY_CSS = """
 <style>
+/* (deprecated) CSS injected early in v2.1.8; kept no-op */
 /* ---------- global ---------- */
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
 :root {
     --gold:   #d4a843;
@@ -1130,13 +1588,32 @@ st.markdown("""
 
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #1a1207 0%, #2a1f0e 100%);
+    min-width: 360px;
+    width: 360px;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, Arial, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.45;
 }
 section[data-testid="stSidebar"] * {
     color: #e8dcc8 !important;
 }
 
-h1, h2, h3 { font-family: 'Cinzel', serif !important; }
-p, li, span, div { font-family: 'Inter', sans-serif; }
+/* Preserve Streamlit's Material icon font (fixes "keyboard_double_a…" artifacts). */
+section[data-testid="stSidebar"] span[class*="material-symbols"] {
+    font-family: 'Material Symbols Rounded' !important;
+    font-size: 20px !important;
+    line-height: 1 !important;
+}
+
+/* General text elements (avoid forcing font-size on widgets/buttons). */
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] li,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] small,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] .stCaption {
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, Arial, sans-serif !important;
+}
 
 /* ---------- sidebar ---------- */
 .sidebar-brand {
@@ -1146,46 +1623,74 @@ p, li, span, div { font-family: 'Inter', sans-serif; }
 .sidebar-brand h2 {
     color: var(--gold) !important;
     margin: 0;
-    font-size: 1.35rem;
-    letter-spacing: 1.5px;
+    font-size: 1.15rem;
+    letter-spacing: 0.4px;
+    font-weight: 650;
 }
 .sidebar-brand .tagline {
-    font-size: 0.78rem;
+    font-size: 0.86rem;
     color: #a89878 !important;
     margin-top: 2px;
 }
-.status-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+
+.sidebar-meta {
+    font-size: 0.84rem;
+    line-height: 1.35;
+    padding: 0.25rem 0.1rem 0.6rem;
+}
+.meta-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 10px;
-    padding: 0 0.3rem;
+    margin: 2px 0;
 }
-.status-card {
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(212,168,67,0.18);
-    border-radius: 8px;
-    padding: 10px 12px;
-    text-align: center;
-}
-.status-card .label {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 1px;
+.meta-key {
     color: #a89878 !important;
-    margin-bottom: 3px;
+    flex: 0 0 auto;
 }
-.status-card .value {
+.meta-val {
+    flex: 1 1 auto;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sidebar-status {
+    padding: 0.35rem 0.15rem 0.55rem;
     font-size: 0.92rem;
-    font-weight: 600;
-    color: var(--gold) !important;
+    color: #d9ccb4 !important;
 }
-.dot-online {
-    display: inline-block;
-    width: 7px; height: 7px;
-    background: #4caf50;
-    border-radius: 50%;
-    margin-right: 4px;
-    vertical-align: middle;
+.sidebar-status .muted {
+    color: #a89878 !important;
+}
+.sidebar-status code {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(212,168,67,0.18) !important;
+    padding: 1px 6px !important;
+    border-radius: 999px !important;
+    font-size: 0.84rem !important;
+    color: #e8dcc8 !important;
+}
+
+/* v2.1.5: The legacy "sidebar-status" block is kept for compatibility but not used. */
+.sidebar-status { display: none; }
+.danger-actions [data-testid="stButton"] button {
+    border-radius: 10px !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-secondary"] {
+    border: 1px solid rgba(212,168,67,0.28) !important;
+    background: rgba(255,255,255,0.04) !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-secondary"]:hover {
+    border-color: rgba(212,168,67,0.55) !important;
+    background: rgba(212,168,67,0.08) !important;
+}
+.danger-actions [data-testid="stButton"] button[data-testid="baseButton-primary"] {
+    background: #ff4d4d !important;
+    border: 1px solid #ff4d4d !important;
+    color: #1a1207 !important;
+    font-weight: 650 !important;
 }
 
 /* ---------- hero / welcome ---------- */
@@ -1305,9 +1810,25 @@ section[data-testid="stSidebar"] div[data-testid="stRadio"] label {
     font-weight: 500 !important;
     font-size: 0.88rem !important;
 }
+
+/* Consistent vertical rhythm (prevents overlap when fonts scale). */
+section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    margin: 0.35rem 0 0.5rem;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+    padding: 0.35rem 0.15rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stButton"],
+section[data-testid="stSidebar"] [data-testid="stSelectbox"],
+section[data-testid="stSidebar"] [data-testid="stRadio"],
+section[data-testid="stSidebar"] [data-testid="stTextInput"] {
+    margin-bottom: 0.45rem;
+}
 </style>
-""", unsafe_allow_html=True)
-_profile("CSS injected")
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1876,10 @@ def _wipe_history() -> None:
         None intentionally; deletion errors are toasted, not raised.
     """
     st.session_state.messages = []
+    # Clear any queued UI work so a rerun can't resurrect stale prompts.
+    st.session_state.pending_query = None
+    st.session_state.pending_draft = None
+    st.session_state.pop("_pending_assistant_query", None)
     try:
         HISTORY_FILE.unlink(missing_ok=True)
     except Exception as exc:
@@ -1493,6 +2018,10 @@ def _extract_general_knowledge_warning(answer_text: str) -> tuple[Optional[str],
     if stripped.startswith(GENERAL_KNOWLEDGE_WARNING):
         body = stripped[len(GENERAL_KNOWLEDGE_WARNING) :].lstrip("\n\r ")
         return GENERAL_KNOWLEDGE_WARNING, body
+    soft = LOW_RELEVANCE_SOFT_WARNING
+    if soft and stripped.startswith(soft):
+        body = stripped[len(soft) :].lstrip("\n\r ")
+        return soft, body
     return None, answer_text
 
 
@@ -1606,14 +2135,13 @@ def _confirm_destroy_brain_dialog(destroy_target: str) -> None:
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    _SIDEBAR_BRAND_SLOT.markdown(
+    st.markdown(
         '<div class="sidebar-brand">'
         f'<h2>\U0001F4DC {PRODUCTION_HEADER}</h2>'
         '<div class="tagline">Production D&D Archivist</div>'
         '</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("---")
 
     _available_brains = _list_brains()
     if st.session_state.brain_id not in _available_brains:
@@ -1622,127 +2150,120 @@ with st.sidebar:
     _wk = _engine_cache_key("db", st.session_state.llm_mode, st.session_state.brain_id)
     _wk_errors = _shared_state()["errors"]
     _engine_ready = _heartbeat_ready("db", st.session_state.llm_mode, st.session_state.brain_id)
-    if _engine_ready:
-        _status_html = '<div class="value"><span class="dot-online"></span> Online</div>'
-    elif _wk in _wk_errors:
-        _status_html = '<div class="value" style="color:#e57373 !important;">❌ Error</div>'
-    else:
-        _status_html = '<div class="value" style="color:#ffd54f !important;">🔄 Loading…</div>'
-
     _gpu_state_key, _gpu_html, _gpu_ok, _gpu_name = _gpu_badge_state(engine_ready=_engine_ready)
 
-    _engine_badge = "✅ Online" if _engine_ready else ("❌ Error" if _wk in _wk_errors else "🔄 Loading")
-    _gpu_badge = (
-        "🟢 GPU"
-        if _gpu_state_key == "active"
-        else ("🟡 GPU" if _gpu_state_key == "searching" else "🔴 GPU")
-    )
-    _SIDEBAR_STATUS_SLOT.markdown(
-        '<div style="display:flex;flex-wrap:wrap;gap:6px;padding:0 0.2rem 0.2rem;">'
-        f'<span style="font-size:0.72rem;padding:2px 7px;border:1px solid rgba(212,168,67,0.25);border-radius:999px;">{_engine_badge}</span>'
-        f'<span style="font-size:0.72rem;padding:2px 7px;border:1px solid rgba(212,168,67,0.25);border-radius:999px;">v{APP_VERSION}</span>'
-        '<span style="font-size:0.72rem;padding:2px 7px;border:1px solid rgba(212,168,67,0.25);border-radius:999px;">Hybrid</span>'
-        '<span style="font-size:0.72rem;padding:2px 7px;border:1px solid rgba(212,168,67,0.25);border-radius:999px;">FlashRank</span>'
-        f'<span style="font-size:0.72rem;padding:2px 7px;border:1px solid rgba(212,168,67,0.25);border-radius:999px;">{_gpu_badge}</span>'
-        '</div>',
-        unsafe_allow_html=True,
+    _engine_state = "Online" if _engine_ready else ("Error" if _wk in _wk_errors else "Loading")
+    _gpu_state = "Active" if _gpu_state_key == "active" else ("Searching" if _gpu_state_key == "searching" else "Inactive")
+    _mode_label = "Auto Efficiency" if (st.session_state.llm_mode or "efficiency") == "efficiency" else "Premium Intelligence"
+
+    st.markdown(
+        "\n".join([
+            f"Status: **{_engine_state}** | v {APP_VERSION}",
+            "",
+            f"Engine: Hybrid + FlashRank | GPU: **{_gpu_state}**",
+            "",
+            f"Brain: `{st.session_state.brain_id}` | Filter: `{st.session_state.edition_filter}`",
+            "",
+            f"Mode: **{_mode_label}**",
+        ])
     )
 
-    # Engine readiness caption (updates on each Streamlit rerun)
-    if _engine_ready:
-        _SIDEBAR_STATUS_CAPTION_SLOT.caption(
-            f"System: ✅ Online | Brain: {st.session_state.brain_id} | Filtering: {st.session_state.edition_filter}"
+    with st.expander("🧠 Brain Vault", expanded=False):
+        _selected_brain = st.selectbox(
+            "Select Brain",
+            options=_available_brains,
+            index=_available_brains.index(st.session_state.brain_id),
         )
-    elif _wk in _wk_errors:
-        _SIDEBAR_STATUS_CAPTION_SLOT.caption(f"System: ❌ Engine error — {_wk_errors[_wk][:80]}")
-    else:
-        _SIDEBAR_STATUS_CAPTION_SLOT.caption("System: 🔄 Loading Engine…")
-
-    st.markdown('<div class="mgmt-header">🧠 Brain Vault</div>', unsafe_allow_html=True)
-    _selected_brain = st.selectbox(
-        "Select Brain",
-        options=_available_brains,
-        index=_available_brains.index(st.session_state.brain_id),
-    )
-    if _selected_brain != st.session_state.brain_id:
-        previous_brain = st.session_state.brain_id
-        st.session_state.brain_id = _selected_brain
-        _upsert_brain_metadata(_selected_brain, touch_last_used=True)
-        get_engine.clear()
-        _reset_warmup_all()
-        st.session_state.pending_uploads = {}
-        st.session_state.uploader_key = st.session_state.get("uploader_key", 0) + 1
-        for mode_name in ("efficiency", "intelligence"):
-            st.session_state.pop(f"_engine_shown_ready:{previous_brain}:{mode_name}", None)
-            st.session_state.pop(f"_engine_shown_ready:{_selected_brain}:{mode_name}", None)
-        _ensure_warmup("db", st.session_state.llm_mode, st.session_state.brain_id)
-        _ensure_heartbeat_service("db", st.session_state.llm_mode, st.session_state.brain_id)
-        st.rerun()
-
-    _new_brain_name = st.text_input(
-        "Create Brain",
-        value="",
-        placeholder="e.g., cs_degree",
-    )
-    if st.button("Create New Brain", use_container_width=True):
-        new_brain = _normalize_brain_id(_new_brain_name)
-        if new_brain in _available_brains:
-            st.warning(f"Brain '{new_brain}' already exists.")
-        else:
-            _brain_db_dir(new_brain).mkdir(parents=True, exist_ok=True)
-            _brain_data_dir(new_brain).mkdir(parents=True, exist_ok=True)
-            _upsert_brain_metadata(new_brain, touch_last_used=True)
-            st.session_state.brain_id = new_brain
+        if _selected_brain != st.session_state.brain_id:
+            previous_brain = st.session_state.brain_id
+            st.session_state.brain_id = _selected_brain
+            _upsert_brain_metadata(_selected_brain, touch_last_used=True)
             get_engine.clear()
             _reset_warmup_all()
             st.session_state.pending_uploads = {}
             st.session_state.uploader_key = st.session_state.get("uploader_key", 0) + 1
             for mode_name in ("efficiency", "intelligence"):
-                st.session_state.pop(f"_engine_shown_ready:{new_brain}:{mode_name}", None)
+                st.session_state.pop(f"_engine_shown_ready:{previous_brain}:{mode_name}", None)
+                st.session_state.pop(f"_engine_shown_ready:{_selected_brain}:{mode_name}", None)
             _ensure_warmup("db", st.session_state.llm_mode, st.session_state.brain_id)
             _ensure_heartbeat_service("db", st.session_state.llm_mode, st.session_state.brain_id)
-            st.success(f"Brain '{new_brain}' created.")
             st.rerun()
 
-    with st.expander("☢️ Danger Zone"):
-        _destroy_target = st.selectbox(
-            "Brain to destroy",
-            options=_available_brains,
-            index=_available_brains.index(st.session_state.brain_id),
+        _new_brain_name = st.text_input(
+            "Brain Name",
+            value="",
+            key="brain_name_input",
+            placeholder="e.g., cs_degree",
         )
-        if st.button("Destroy Brain", type="primary", use_container_width=True):
-            _confirm_destroy_brain_dialog(_destroy_target)
+        if st.button("Create Brain", use_container_width=True):
+            if not (_new_brain_name or "").strip():
+                st.warning("Enter a brain name.")
+            else:
+                new_brain = _normalize_brain_id(_new_brain_name)
+                _brains_fresh = _list_brains()
+                if new_brain in _brains_fresh:
+                    st.warning(f"Brain '{new_brain}' already exists.")
+                else:
+                    _brain_db_dir(new_brain).mkdir(parents=True, exist_ok=True)
+                    _brain_data_dir(new_brain).mkdir(parents=True, exist_ok=True)
+                    _upsert_brain_metadata(new_brain, touch_last_used=True)
+                    st.session_state.brain_id = new_brain
+                    get_engine.clear()
+                    _reset_warmup_all()
+                    st.session_state.pending_uploads = {}
+                    st.session_state.uploader_key = st.session_state.get("uploader_key", 0) + 1
+                    for mode_name in ("efficiency", "intelligence"):
+                        st.session_state.pop(f"_engine_shown_ready:{new_brain}:{mode_name}", None)
+                    _ensure_warmup("db", st.session_state.llm_mode, st.session_state.brain_id)
+                    _ensure_heartbeat_service("db", st.session_state.llm_mode, st.session_state.brain_id)
+                    st.success(f"Brain '{new_brain}' created.")
+                    st.rerun()
 
-    st.markdown("---")
-    st.markdown('<div class="mgmt-header">\u26A1 Model</div>', unsafe_allow_html=True)
-    st.caption("How should answers be generated?")
-    _tier_labels = {"efficiency": "Auto Efficiency", "intelligence": "Premium Intelligence"}
-    _picked = st.radio(
-        "Model tier",
-        options=["efficiency", "intelligence"],
-        index=0 if st.session_state.llm_mode == "efficiency" else 1,
-        format_func=lambda m: _tier_labels[m],
-        label_visibility="collapsed",
-    )
-    _llm_options = ["llama3:8b-instruct-q4_K_M", "llama3:latest"]
-    if st.session_state.active_model not in _llm_options:
-        st.session_state.active_model = _llm_options[0]
-    if _picked == "efficiency":
-        st.markdown("**Active LLM**")
-        _model_pick = st.selectbox(
-            "Active LLM",
-            options=_llm_options,
-            index=_llm_options.index(st.session_state.active_model),
+    with st.expander("⚡ Model", expanded=False):
+        st.caption("How should answers be generated?")
+        _tier_labels = {"efficiency": "Auto Efficiency", "intelligence": "Premium Intelligence"}
+        _picked = st.radio(
+            "Model tier",
+            options=["efficiency", "intelligence"],
+            index=0 if st.session_state.llm_mode == "efficiency" else 1,
+            format_func=lambda m: _tier_labels[m],
             label_visibility="collapsed",
         )
-        st.markdown(
-            '<div style="font-size:0.72rem;opacity:0.8;margin-top:-0.2rem;">Local Ollama model</div>',
-            unsafe_allow_html=True,
-        )
-        if _model_pick != st.session_state.active_model:
+        _llm_options = ["llama3:8b-instruct-q4_K_M", "llama3:latest"]
+        if st.session_state.active_model not in _llm_options:
+            st.session_state.active_model = _llm_options[0]
+        if _picked == "efficiency":
+            st.markdown("**Active LLM**")
+            _model_pick = st.selectbox(
+                "Active LLM",
+                options=_llm_options,
+                index=_llm_options.index(st.session_state.active_model),
+                label_visibility="collapsed",
+            )
+            st.markdown(
+                '<div style="font-size:0.9rem;opacity:0.82;margin-top:-0.15rem;">Local Ollama model</div>',
+                unsafe_allow_html=True,
+            )
+            if _model_pick != st.session_state.active_model:
+                _maybe_auto_memory_reclaim()
+                st.session_state.active_model = _model_pick
+                os.environ["OLLAMA_CHAT_MODEL"] = _model_pick
+                get_engine.clear()
+                _reset_warmup_all()
+                for mode_name in ("efficiency", "intelligence"):
+                    st.session_state.pop(
+                        f"_engine_shown_ready:{st.session_state.brain_id}:{mode_name}",
+                        None,
+                    )
+                _ensure_warmup("db", "efficiency", st.session_state.brain_id)
+                _ensure_heartbeat_service("db", "efficiency", st.session_state.brain_id)
+                st.rerun()
+        else:
+            st.caption("Provider: GPT-5.4")
+        if _picked != st.session_state.llm_mode:
             _maybe_auto_memory_reclaim()
-            st.session_state.active_model = _model_pick
-            os.environ["OLLAMA_CHAT_MODEL"] = _model_pick
+            st.session_state.llm_mode = _picked
+            os.environ["OLLAMA_CHAT_MODEL"] = st.session_state.active_model
             get_engine.clear()
             _reset_warmup_all()
             for mode_name in ("efficiency", "intelligence"):
@@ -1750,27 +2271,24 @@ with st.sidebar:
                     f"_engine_shown_ready:{st.session_state.brain_id}:{mode_name}",
                     None,
                 )
-            _ensure_warmup("db", "efficiency", st.session_state.brain_id)
-            _ensure_heartbeat_service("db", "efficiency", st.session_state.brain_id)
+            _ensure_warmup("db", _picked, st.session_state.brain_id)
+            _ensure_heartbeat_service("db", _picked, st.session_state.brain_id)
             st.rerun()
-    else:
-        st.caption("Provider: GPT-5.4")
-    if _picked != st.session_state.llm_mode:
-        _maybe_auto_memory_reclaim()
-        st.session_state.llm_mode = _picked
-        os.environ["OLLAMA_CHAT_MODEL"] = st.session_state.active_model
-        get_engine.clear()
-        _reset_warmup_all()
-        for mode_name in ("efficiency", "intelligence"):
-            st.session_state.pop(
-                f"_engine_shown_ready:{st.session_state.brain_id}:{mode_name}",
-                None,
-            )
-        _ensure_warmup("db", _picked, st.session_state.brain_id)
-        _ensure_heartbeat_service("db", _picked, st.session_state.brain_id)
-        st.rerun()
 
-    st.caption("Engine warms in the background at page load.")
+        st.caption("Engine warms in the background at page load.")
+
+        st.markdown("**Retrieval**")
+        st.session_state.multi_query_enabled = st.checkbox(
+            "Multi-query expansion",
+            value=bool(st.session_state.multi_query_enabled),
+            help="When enabled, the Lore Keeper generates up to 3 semantic query variants and merges their BM25 + vector hits with Reciprocal Rank Fusion before reranking (better coverage, sometimes more latency).",
+        )
+        st.session_state.context_expansion_enabled = st.checkbox(
+            "Context Expansion (Page +/-)",
+            value=bool(st.session_state.get("context_expansion_enabled", False)),
+            help="Adds neighboring pages when confidence is high. Increases detail but takes longer.",
+        )
+
     st.markdown("")
     st.markdown('<div class="mgmt-header">📚 Ruleset Filter</div>', unsafe_allow_html=True)
     _edition_options = ["All", "2014", "2024"]
@@ -1782,12 +2300,20 @@ with st.sidebar:
         index=_edition_options.index(st.session_state.edition_filter),
     )
 
-    st.markdown("")
-    if st.button("\U0001F5D1\uFE0F  Clear Conversation", use_container_width=True):
-        _confirm_clear_dialog()
+    with st.expander("☢️ Danger Zone", expanded=False):
+        st.markdown('<div class="danger-actions">', unsafe_allow_html=True)
+        if st.button("\U0001F5D1\uFE0F  Clear Conversation", type="secondary", use_container_width=True):
+            _confirm_clear_dialog()
+        _destroy_target = st.selectbox(
+            "Brain to destroy",
+            options=_available_brains,
+            index=_available_brains.index(st.session_state.brain_id),
+        )
+        if st.button("Destroy Brain", type="primary", use_container_width=True):
+            _confirm_destroy_brain_dialog(_destroy_target)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Upload Knowledge ────────────────────────────────────────────────────
-    st.markdown("---")
     # uploader_key is incremented after processing to reset the widget (clears the UI)
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = 0
@@ -1894,7 +2420,6 @@ with st.sidebar:
                 logger.exception("Ingestion failure: %s", e)
                 render_error_state("ingest", f"Ingestion failed: {e}")
 
-    st.markdown("---")
     st.markdown('<div class="mgmt-header">🧾 Export Research</div>', unsafe_allow_html=True)
     _report_md = _build_research_markdown(
         messages=st.session_state.get("messages", []),
@@ -1913,6 +2438,7 @@ with st.sidebar:
         use_container_width=True,
     )
     st.caption("Built with LangChain, ChromaDB & Streamlit")
+    _persist_ui_settings_to_disk()
     _profile("sidebar rendered")
 
 
@@ -1926,7 +2452,10 @@ if "_health_server_started" not in st.session_state:
     st.session_state._health_server_started = True
 
 if "messages" not in st.session_state:
-    # Try to restore the previous session from disk first.
+    # Restore the previous session from disk (refresh-safe).
+    st.session_state.messages = _load_history()
+elif not isinstance(st.session_state.get("messages"), list):
+    # Defensive: if some earlier run left an invalid value, repair it.
     st.session_state.messages = _load_history()
 
 if "pending_query" not in st.session_state:
@@ -1983,27 +2512,26 @@ def render_chat_history(messages: list[dict[str, Any]]) -> None:
                 _render_verified_sources_expander(msg.get("sources") or [])
 
 
-def render_suggestion_pills(messages: list[dict[str, Any]], suggestions: list[str]) -> None:
-    """Render quick suggestion blobs above chat input for empty chat history.
+def render_suggestion_pills(suggestions: list[str], *, disabled: bool) -> None:
+    """Render quick suggestion blobs above chat input.
 
     Args:
-        messages: Current session chat list.
-        suggestions: Preset suggestion text options.
+        suggestions: Exactly three preset question strings.
+        disabled: If True, disable buttons (engine warming / responding).
 
     Returns:
         None. Clicking a blob fills a draft "mid-gate" with Send/Cancel controls.
     """
-    if len(messages) != 0:
-        return
     st.markdown('<div class="suggestion-blobs">', unsafe_allow_html=True)
     blob_cols = st.columns(len(suggestions), gap="small")
     for idx, (col, suggestion) in enumerate(zip(blob_cols, suggestions)):
         with col:
             if st.button(
                 suggestion or "Suggestion",
-                key=f"suggestion_blob__{idx}",
+                key=f"suggestion_blob__{idx}__{abs(hash(suggestion)) % 10_000}",
                 type="secondary",
                 use_container_width=True,
+                disabled=disabled,
             ):
                 st.session_state.pending_draft = suggestion
                 # If a mid-gate draft is already open, replace its text immediately.
@@ -2025,6 +2553,9 @@ def render_draft_midgate(*, disabled: bool) -> Optional[str]:
     Returns:
         The submitted query text on Send, otherwise None.
     """
+    # If an assistant run is pending, never show the draft bar.
+    if (st.session_state.get("_pending_assistant_query") or "").strip():
+        return None
     draft = st.session_state.get("pending_draft")
     if not (draft or "").strip():
         return None
@@ -2060,20 +2591,51 @@ def render_draft_midgate(*, disabled: bool) -> Optional[str]:
     return None
 
 
-render_welcome_hero(st.session_state.messages)
-render_chat_history(st.session_state.messages)
+history_container = st.container()
+response_container = st.container()
+
+with history_container:
+    render_welcome_hero(st.session_state.messages)
+    render_chat_history(st.session_state.messages)
+
+response_slot = response_container.empty()
 
 
 # ---------------------------------------------------------------------------
 # Chat input
 # ---------------------------------------------------------------------------
-query = st.session_state.pop("pending_query", None)
+if "_pending_assistant_query" not in st.session_state:
+    st.session_state._pending_assistant_query = None
+
+incoming_query = st.session_state.pop("pending_query", None)
 _chat_disabled = not _engine_ready
 
-if query is None:
-    render_suggestion_pills(st.session_state.messages, SUGGESTION_QUESTIONS)
+if incoming_query is None:
+    # Suggestions stay visible across the session; always show 3.
+    disabled_suggestions = bool(_chat_disabled or (st.session_state.get("_pending_assistant_query") or "").strip())
+    triplet = list(st.session_state.get("suggestion_triplet") or random.sample(SUGGESTION_POOL, k=3))
+    triplet = (triplet + random.sample(SUGGESTION_POOL, k=3))[:3]
+    q1, q2, q3 = triplet[0], triplet[1], triplet[2]
+
+    sugg_cols = st.columns([3, 3, 3, 1], gap="small")
+    for idx, (col, suggestion) in enumerate(zip(sugg_cols[:3], [q1, q2, q3])):
+        with col:
+            if st.button(
+                suggestion or "Suggestion",
+                key=f"suggestion_blob__bottom__{idx}__{abs(hash(suggestion)) % 10_000}",
+                type="secondary",
+                use_container_width=True,
+                disabled=disabled_suggestions,
+            ):
+                st.session_state.pending_draft = suggestion
+                st.session_state["_draft_input"] = suggestion
+                st.rerun()
+    with sugg_cols[3]:
+        if st.button("🔄", help="Refresh suggested questions", use_container_width=True, disabled=disabled_suggestions):
+            st.session_state.suggestion_triplet = random.sample(SUGGESTION_POOL, k=3)
+            st.rerun()
     render_draft_midgate(disabled=_chat_disabled)
-    query = st.chat_input("Ask the Lore Keeper \u2026", disabled=_chat_disabled)
+    incoming_query = st.chat_input("Ask the Lore Keeper \u2026", disabled=_chat_disabled)
 
 if _chat_disabled:
     st.caption("Engine warmup in progress. Chat input unlocks when initialization finishes.")
@@ -2085,124 +2647,139 @@ else:
         if _gpu_state_for_hint != "active":
             st.caption("GPU Acceleration is still warming up. Queries may run on CPU until the badge turns 🟢.")
 
-if query:
-    # Snapshot history BEFORE appending the new message so the current query
-    # doesn't appear twice (once in history, once as the query argument).
-    history = _history_for_keeper(st.session_state.messages)
+if incoming_query:
+    text = str(incoming_query).strip()
+    if text and not _chat_disabled:
+        st.session_state._pending_assistant_query = text
+        # Append exactly once: if the last message is already this user query, don't add it again.
+        if not st.session_state.messages or st.session_state.messages[-1].get("role") != "human" or st.session_state.messages[-1].get("content") != text:
+            st.session_state.messages.append({"role": "human", "content": text, "sources": None})
+            _save_history(st.session_state.messages)
+        # Rerun so the appended user message is rendered via the single history pass above.
+        st.rerun()
+
+# Phase 2: run the assistant only after history has been rendered.
+pending_assistant_query = str(st.session_state.get("_pending_assistant_query") or "").strip()
+if pending_assistant_query and not _chat_disabled:
+    query = pending_assistant_query
+    history = _history_for_keeper(st.session_state.messages[:-1] if st.session_state.messages else [])
     _upsert_brain_metadata(st.session_state.brain_id, touch_last_used=True)
+    _mq_state = bool(st.session_state.get("multi_query_enabled", True))
+    _ctx_exp_state = bool(st.session_state.get("context_expansion_enabled", False))
 
-    st.session_state.messages.append({"role": "human", "content": query, "sources": None})
-
-    with st.chat_message("user"):
-        st.markdown(query)
-
-    with st.chat_message("assistant"):
-        if not _heartbeat_ready("db", st.session_state.llm_mode, st.session_state.brain_id):
-            with st.spinner("Engine still warming up — please wait…"):
-                keeper = resolve_engine()
-        else:
-            keeper = resolve_engine()
-        # resolve_engine() guarantees the engine is built. Belt-and-suspenders:
-        # explicitly add the key to "built" and set the event so _engine_is_ready()
-        # returns True on this very rerun even before the auto-refresh section runs.
-        _wup_key = _engine_cache_key("db", st.session_state.llm_mode, st.session_state.brain_id)
-        _shared_state()["built"].add(_wup_key)
-        _wup_ev = _shared_state()["events"].get(_wup_key)
-        if _wup_ev:
-            _wup_ev.set()
-        answer = ""
-        warning_note: Optional[str] = None
-        citation_warning: Optional[str] = None
-        sources: list[dict[str, Any]] = []
-        warning_slot = st.empty()
-        citation_slot = st.empty()
-        answer_slot = st.empty()
-        verify_slot = st.empty()
-        try:
-            ok, msg = _preflight_llm_ok(st.session_state.llm_mode)
-            if not ok:
-                st.warning(msg)
-                render_error_state("preflight", msg)
-                raise RuntimeError(msg)
-            with st.spinner("Retrieving from the archives \u2026"):
-                token_stream, sources = keeper.stream_query(
-                    query,
-                    history,
-                    edition_filter=st.session_state.edition_filter,
-                )
-            if not sources:
-                verify_slot.info("🧠 General Knowledge Mode: No verified chunks retrieved.", icon="🧠")
-            with st.spinner("The Lore Keeper is thinking\u2026"):
-                verify_slot.caption("🔍 Verifying answer integrity...")
-                acc: list[str] = []
-                for chunk in token_stream:
-                    acc.append(str(chunk))
-                    answer_slot.markdown("".join(acc))
-                verify_slot.empty()
-                raw_answer = "".join(acc)
-                warning_note, answer = _extract_general_knowledge_warning(raw_answer)
-                answer = _normalize_not_found_disclaimer(answer)
-                answer = _strip_inline_source_tags(answer)
-                if warning_note:
-                    warning_slot.warning(warning_note)
-                    answer_slot.markdown(answer)
-                bad_tags = _citation_hallucination_tags(raw_answer, sources)
-                if bad_tags:
-                    citation_warning = (
-                        "Citation Hallucination detected: "
-                        + ", ".join(f"`{b}`" for b in bad_tags)
-                        + " not present in retrieved source set."
-                    )
-                    citation_slot.warning(citation_warning)
-                    logger.warning(
-                        "Citation Hallucination | claimed=%s | retrieved=%s",
-                        bad_tags,
-                        sorted(_source_filenames_from_source_dicts(sources)),
-                    )
-        except Exception as exc:
-            err_s = str(exc).lower()
-            if (
-                "404" in str(exc)
-                or "not found" in err_s
-                or "responseerror" in err_s.replace(" ", "")
-            ):
-                _ollama_model = (
-                    (os.getenv("OLLAMA_CHAT_MODEL") or "llama3:8b-instruct-q4_K_M").strip()
-                    or "llama3:8b-instruct-q4_K_M"
-                )
-                _pull_cmd = f"docker exec -it ollama ollama pull {_ollama_model}"
-                st.error(
-                    "**Ollama model missing or still downloading.** The app uses the **Docker** "
-                    "Ollama service (`ollama` container)—host-only pulls are invisible there. "
-                    "If the automatic pull has not finished, run this on the host:"
-                )
-                st.code(_pull_cmd, language="bash")
-                st.caption(
-                    "Then run `docker exec -it ollama ollama list` and set **OLLAMA_CHAT_MODEL** "
-                    "to that exact name, or switch to **Premium Intelligence**."
-                )
+    with response_slot.container():
+        with st.chat_message("assistant"):
+            if not _heartbeat_ready("db", st.session_state.llm_mode, st.session_state.brain_id):
+                with st.spinner("Engine still warming up — please wait…"):
+                    keeper = resolve_engine()
             else:
-                logger.exception("Query loop engine failure: %s", exc)
-                answer = (
-                    "System Recovering: A temporary engine fault was detected. "
-                    "Please retry in a few seconds."
-                )
-                warning_slot.warning(answer)
-                render_error_state("query", str(exc))
-        verify_slot.empty()
-        if answer is None:
-            answer = ""
-        _render_verified_sources_expander(sources)
+                keeper = resolve_engine()
+            # Per-session retrieval config toggles (do not require engine rebuild).
+            try:
+                keeper.multi_query_enabled = _mq_state
+                keeper.context_expansion_enabled = _ctx_exp_state
+            except Exception:
+                pass
+            _wup_key = _engine_cache_key("db", st.session_state.llm_mode, st.session_state.brain_id)
+            _shared_state()["built"].add(_wup_key)
+            _wup_ev = _shared_state()["events"].get(_wup_key)
+            if _wup_ev:
+                _wup_ev.set()
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "warning_note": warning_note,
-        "citation_warning": citation_warning,
-        "sources": sources or [],
-    })
-    # Persist after every assistant turn so a refresh never loses the conversation.
-    _save_history(st.session_state.messages)
+            answer = ""
+            warning_note: Optional[str] = None
+            citation_warning: Optional[str] = None
+            sources: list[dict[str, Any]] = []
+            warning_slot = st.empty()
+            citation_slot = st.empty()
+            answer_slot = st.empty()
+            verify_slot = st.empty()
+            try:
+                ok, msg = _preflight_llm_ok(st.session_state.llm_mode)
+                if not ok:
+                    st.warning(msg)
+                    render_error_state("preflight", msg)
+                    raise RuntimeError(msg)
+                with st.spinner("Retrieving from the archives \u2026"):
+                    token_stream, sources = keeper.stream_query(
+                        query,
+                        history,
+                        edition_filter=st.session_state.edition_filter,
+                    )
+                if not sources:
+                    verify_slot.info("🧠 General Knowledge Mode: No verified chunks retrieved.", icon="🧠")
+                with st.spinner("The Lore Keeper is thinking\u2026"):
+                    verify_slot.caption("🔍 Verifying answer integrity...")
+                    acc: list[str] = []
+                    for chunk in token_stream:
+                        acc.append(str(chunk))
+                        answer_slot.markdown("".join(acc))
+                    verify_slot.empty()
+                    raw_answer = "".join(acc)
+                    warning_note, answer = _extract_general_knowledge_warning(raw_answer)
+                    answer = _normalize_not_found_disclaimer(answer)
+                    answer = _strip_inline_source_tags(answer)
+                    if warning_note:
+                        warning_slot.warning(warning_note)
+                        answer_slot.markdown(answer)
+                    bad_tags = _citation_hallucination_tags(raw_answer, sources)
+                    if bad_tags:
+                        citation_warning = (
+                            "Citation Hallucination detected: "
+                            + ", ".join(f"`{b}`" for b in bad_tags)
+                            + " not present in retrieved source set."
+                        )
+                        citation_slot.warning(citation_warning)
+                        logger.warning(
+                            "Citation Hallucination | claimed=%s | retrieved=%s",
+                            bad_tags,
+                            sorted(_source_filenames_from_source_dicts(sources)),
+                        )
+            except Exception as exc:
+                err_s = str(exc).lower()
+                if (
+                    "404" in str(exc)
+                    or "not found" in err_s
+                    or "responseerror" in err_s.replace(" ", "")
+                ):
+                    _ollama_model = (
+                        (os.getenv("OLLAMA_CHAT_MODEL") or "llama3:8b-instruct-q4_K_M").strip()
+                        or "llama3:8b-instruct-q4_K_M"
+                    )
+                    _pull_cmd = f"docker exec -it ollama ollama pull {_ollama_model}"
+                    st.error(
+                        "**Ollama model missing or still downloading.** The app uses the **Docker** "
+                        "Ollama service (`ollama` container)—host-only pulls are invisible there. "
+                        "If the automatic pull has not finished, run this on the host:"
+                    )
+                    st.code(_pull_cmd, language="bash")
+                    st.caption(
+                        "Then run `docker exec -it ollama ollama list` and set **OLLAMA_CHAT_MODEL** "
+                        "to that exact name, or switch to **Premium Intelligence**."
+                    )
+                else:
+                    logger.exception("Query loop engine failure: %s", exc)
+                    answer = (
+                        "System Recovering: A temporary engine fault was detected. "
+                        "Please retry in a few seconds."
+                    )
+                    warning_slot.warning(answer)
+                    render_error_state("query", str(exc))
+            verify_slot.empty()
+            if answer is None:
+                answer = ""
+            _render_verified_sources_expander(sources)
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": answer,
+            "warning_note": warning_note,
+            "citation_warning": citation_warning,
+            "sources": sources or [],
+        })
+        _save_history(st.session_state.messages)
+        st.session_state._pending_assistant_query = None
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------

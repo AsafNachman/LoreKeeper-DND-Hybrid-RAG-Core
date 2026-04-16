@@ -21,6 +21,124 @@ logger = logging.getLogger("lorekeeper.inference")
 
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE | re.MULTILINE)
 
+_CONTEXT_CITATION_PREFIX_PHRASE = "From"
+_LEADING_ATTRIBUTION_RE = re.compile(
+    r"^\s*(?:according to|from)\s+.*?(?:,\s*|\:\s*|\n\s*\n)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_META_TALK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bself-?correction\b", re.IGNORECASE),
+    re.compile(r"\bcritic notes?\b", re.IGNORECASE),
+    re.compile(r"\bprevious candidate\b", re.IGNORECASE),
+    re.compile(r"\bhallucinat", re.IGNORECASE),
+    re.compile(r"\bi (?:must|will)\s+(?:correct|revise|rephrase)\b", re.IGNORECASE),
+    re.compile(r"\bto preserve structure\b", re.IGNORECASE),
+    re.compile(r"\bto remove\b.*\bhallucinat", re.IGNORECASE),
+    re.compile(r"\binternal reasoning\b", re.IGNORECASE),
+)
+
+_PAGE_MENTION_RE = re.compile(r"\bpage\s+(\d{1,4})\b", re.IGNORECASE)
+_CONTEXT_PAGE_LABEL_RE = re.compile(r"\[Source:\s*[^\]]+?\|\s*Page\s+(\d{1,4})\]", re.IGNORECASE)
+
+
+def _page_number_audit(candidate_answer: str, context_text: str) -> tuple[bool, str]:
+    """Return (ok, fix_instruction) for page-number integrity.
+
+    Intent:
+        The assistant must not invent page numbers. If the answer mentions any
+        `Page N` that is not present in `[Source: ... | Page N]` labels in the
+        retrieved context, force a DATA_MISMATCH failure.
+    """
+    answer_pages = {m.group(1) for m in _PAGE_MENTION_RE.finditer(str(candidate_answer or ""))}
+    if not answer_pages:
+        return True, ""
+    allowed_pages = {m.group(1) for m in _CONTEXT_PAGE_LABEL_RE.finditer(str(context_text or ""))}
+    # If context has no labels, treat any page mention as invalid.
+    if not allowed_pages:
+        return False, "DATA_MISMATCH: Answer mentioned page numbers but context had no page labels."
+    bad = sorted(p for p in answer_pages if p not in allowed_pages)
+    if bad:
+        return False, f"DATA_MISMATCH: Invented page reference(s) not in context labels: {', '.join(bad)}."
+    return True, ""
+
+
+def _strip_common_lore_disclaimer_when_context_present(answer_text: str) -> str:
+    """Remove the common-lore disclaimer prefix when context was provided.
+
+    Intent:
+        Streaming paths yield a single final answer chunk. When verified context
+        exists, we should never surface the "couldn't find the exact scroll"
+        disclaimer (it is reserved for true no-source answers).
+    """
+    raw = str(answer_text or "").lstrip()
+    if not raw.startswith(Constants.COMMON_LORE_DISCLAIMER):
+        return str(answer_text or "").strip()
+    stripped = raw[len(Constants.COMMON_LORE_DISCLAIMER) :].lstrip()
+    return stripped.strip()
+
+def _sanitize_user_visible_answer(answer_text: str) -> str:
+    """Strip meta-talk and internal repair artifacts from user-visible output.
+
+    Intent:
+        The hidden critic/repair loop should never leak "I am correcting myself"
+        style narration. This sanitizer applies deterministic cleanup after the
+        model generates text.
+    """
+    txt = str(answer_text or "").strip()
+    if not txt:
+        return ""
+    lines = [ln.rstrip() for ln in txt.splitlines()]
+    kept: list[str] = []
+    for ln in lines:
+        if not ln.strip():
+            kept.append("")
+            continue
+        if any(p.search(ln) for p in _META_TALK_PATTERNS):
+            continue
+        kept.append(ln)
+    cleaned = "\n".join(kept).strip()
+    # Collapse excessive blank lines introduced by removals.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
+def _inject_verified_source_citation(answer_text: str, *, citation: str) -> str:
+    """Ensure the answer explicitly names the verified source citation.
+
+    Intent:
+        The UI already renders "View Verified Sources", but the assistant text
+        sometimes says "According to the provided context from ," with a blank
+        citation (model omission). This function deterministically injects the
+        citation into the answer body when verified context exists.
+
+    Args:
+        answer_text: Model answer text.
+        citation: Verified citation label (e.g., "Book.pdf (Page 12)").
+
+    Returns:
+        Answer text that explicitly references `citation`.
+    """
+    cleaned = str(answer_text or "").strip()
+    cite = str(citation or "").strip()
+    if not cleaned or not cite:
+        return cleaned
+    # If the model already included some leading attribution, replace it with ours
+    # so the UI-selected "best" source wins deterministically.
+    replaced = _LEADING_ATTRIBUTION_RE.sub("", cleaned, count=1).lstrip()
+    cleaned = replaced if replaced and replaced != cleaned else cleaned
+
+    lowered = cleaned.lower()
+    phrase_lower = "according to the provided context from".lower()
+    if lowered.startswith(phrase_lower):
+        # Repair legacy phrasing: "According to the provided context from , ..."
+        tail = cleaned[len("According to the provided context from") :].lstrip()
+        if tail.startswith(","):
+            tail = tail[1:].lstrip()
+        return f"From {cite}:\n\n{tail}".strip()
+
+    return f"From {cite}:\n\n{cleaned}".strip()
+
 
 def _compact_raw_snippet(text: str, *, limit: int = 1200) -> str:
     """Return a compact snippet of potentially-long raw model output.
@@ -144,13 +262,32 @@ def invoke_answer_chain(
     context_text: str,
     query: str,
     history: Sequence[tuple[str, str]],
+    directives: str = "",
 ) -> str:
-    """Generate one candidate answer from the main prompt chain."""
+    """Generate one candidate answer from the main prompt chain.
+
+    Args:
+        prompt: LangChain chat prompt template (expects ``context``, ``question``, ``chat_history``, ``directives``).
+        llm: Chat model runnable.
+        str_parser: Output parser.
+        context_text: Retrieved evidence blocks for the ``Context`` slot.
+        query: User question (possibly augmented with hidden system notes).
+        history: Prior chat turns.
+        directives: Optional extra system instructions (single-query Level-20 contract); empty for multi-query path.
+
+    Returns:
+        The model's answer string.
+
+    Intent:
+        Keeps retrieval-specific instructions out of the ``context`` blob so the hidden critic
+        focuses on grounding against source excerpts, not formatting contracts.
+    """
     chain = prompt | llm | str_parser
     answer = chain.invoke({
         "context": context_text,
         "question": query,
         "chat_history": history,
+        "directives": directives or "",
     })
     return str(answer or "").strip()
 
@@ -168,6 +305,9 @@ def run_hidden_critic(
         (`passed`, `notes`) where `passed=False` means one retry is required.
     """
     try:
+        ok_pages, mismatch = _page_number_audit(candidate_answer, context_text)
+        if not ok_pages:
+            return False, mismatch
         critic_prompt = Constants.CRITIC_PROMPT_TEMPLATE.format(
             query=query,
             context_text=context_text,
@@ -202,23 +342,23 @@ def run_hidden_critic(
         if verdict_norm == "fail":
             return False, notes
 
-        # Fallback policy: never hard-fault on malformed critic output.
-        # Defaulting to PASS avoids a secondary corrective call chain when the critic
-        # hallucinated its format.
+        # Fallback policy (v2.1.3 strict guardrail): malformed verdict defaults to REJECT.
+        # This biases toward a single repair attempt instead of silently accepting an
+        # unparseable critic response.
         logger.warning(
-            "Hidden critic produced malformed payload; defaulting verdict=pass. "
+            "Hidden critic produced malformed payload; defaulting verdict=fail. "
             "raw_len=%d raw_snippet=%r",
             len(txt),
             _compact_raw_snippet(txt),
         )
-        return True, ""
+        return False, "Critic verdict malformed; defaulting to reject."
     except Exception as exc:
         logger.exception(
-            "Hidden critic crashed; defaulting verdict=pass (%s). raw_snippet=%r",
+            "Hidden critic crashed; defaulting verdict=fail (%s). raw_snippet=%r",
             exc,
             _compact_raw_snippet(str(locals().get("txt", ""))),
         )
-        return True, ""
+        return False, "Critic crashed; defaulting to reject."
 
 
 def generate_with_self_correction(
@@ -229,6 +369,7 @@ def generate_with_self_correction(
     query: str,
     history: Sequence[tuple[str, str]],
     context_text: str,
+    directives: str = "",
 ) -> tuple[str, bool]:
     """Generate answer, critique it, and optionally re-generate once."""
     candidate = invoke_answer_chain(
@@ -238,7 +379,9 @@ def generate_with_self_correction(
         context_text=context_text,
         query=query,
         history=history,
+        directives=directives,
     )
+    candidate = _sanitize_user_visible_answer(candidate)
     passed, critic_notes = run_hidden_critic(
         llm=llm,
         query=query,
@@ -250,12 +393,14 @@ def generate_with_self_correction(
 
     fix_query = (
         f"{query}\n\n"
-        "Self-correction directive:\n"
-        "- Fix all unsupported claims.\n"
-        "- Keep only statements grounded in the provided context.\n"
-        "- Preserve useful structure but remove hallucinations.\n"
-        f"- Critic notes: {critic_notes}\n\n"
-        f"Previous candidate to fix:\n{candidate}\n"
+        "Rewrite directive (do NOT mention this directive):\n"
+        "- Output ONLY the final answer.\n"
+        "- Do NOT mention correction, critique, hallucinations, rewriting, or internal reasoning.\n"
+        "- Maintain the Lore Keeper Archivist voice: authoritative, concise, grounded.\n"
+        "- Remove any uncertainty/hedging introduced only by the repair process.\n"
+        "- Keep only statements grounded in the provided Context.\n"
+        f"- Grounding issues to resolve: {critic_notes}\n\n"
+        f"Draft answer to rewrite (do NOT mention it):\n{candidate}\n"
     )
     regenerated = invoke_answer_chain(
         prompt=prompt,
@@ -264,7 +409,9 @@ def generate_with_self_correction(
         context_text=context_text,
         query=fix_query,
         history=history,
+        directives=directives,
     )
+    regenerated = _sanitize_user_visible_answer(regenerated or "")
     return regenerated or candidate, True
 
 
@@ -275,11 +422,13 @@ def stream_answer_with_integrity_timing(
     history: Sequence[tuple[str, str]],
     context_text: str,
     no_verified_context: bool,
+    verified_source_citation: str,
     enforce_no_verified_sources_integrity: Any,
     prompt: Any,
     llm: Any,
     str_parser: Any,
     logger: Any,
+    directives: str = "",
 ) -> Iterator[str]:
     """Yield a single answer string but record timing in logs (Streamlit-friendly iterator)."""
 
@@ -299,8 +448,14 @@ def stream_answer_with_integrity_timing(
                 query=query,
                 history=history,
                 context_text=context_text,
+                directives=directives,
             )
             if final_answer:
+                final_answer = _strip_common_lore_disclaimer_when_context_present(final_answer)
+                final_answer = _sanitize_user_visible_answer(final_answer)
+                final_answer = _inject_verified_source_citation(
+                    final_answer, citation=verified_source_citation
+                )
                 token_count = 1
                 yield final_answer
         t_llm = time.perf_counter() - t_llm_start

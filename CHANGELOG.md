@@ -5,6 +5,279 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [2.4.3] - 2026-04-16
+
+### UI/UX
+
+- **Context expansion toggle**: Sidebar checkbox **Context Expansion (Page +/-)** (under Multi-query expansion) with tooltip; default **OFF**; persisted in ``ui_settings.json``.
+- **Versioning**: Product chrome reads **Lore Keeper v2.4.3** from `VERSION`.
+
+### RAG Engine
+
+- **Conditional neighbor fetch**: ``LoreKeeper._expand_with_neighbor_pages`` runs only when ``context_expansion_enabled`` is True **and** top rerank ≥ ``0.95``; otherwise retrieval output is passed through unchanged (no extra Chroma reads).
+
+## [2.4.2] - 2026-04-16
+
+### RAG Engine
+
+- **Neighbor page context**: After retrieval, when any chunk has rerank ≥ ``0.95``, same-source chunks for **page N−1** and **page N+1** (0-based index) are merged into the LLM context (deduped; labeled as neighboring pages). Retrieval scoring in ``retrieval.py`` is unchanged.
+- **Single-query voice**: System directives no longer force rigid section headers; Archivist answers stay technically dense with mechanics woven into prose, **bold** numerics, and an optional closing **Note:**.
+
+### UI/UX
+
+- **Versioning**: Product chrome reads **Lore Keeper v2.4.2** from `VERSION` (``ui_settings.json`` + Brain Vault behavior unchanged from 2.4.1).
+
+## [2.4.1] - 2026-04-16
+
+### RAG Engine
+
+- **Single-query context**: When multi-query expansion is OFF, merge keeps the top five reranked chunks through pruning, prioritizes **gold** sources (rerank ``> 0.80``) at the front of the prompt, and widens the merge cap appropriately—still **no** changes to retrieval/rerank scoring in ``retrieval.py``.
+- **Level-20 generation**: Single-query path injects structured answer directives (Core Rule / Fine Print / Direct Archives blockquote) plus anti-summarization instructions via a dedicated ``{directives}`` prompt slot (evidence stays in ``Context`` for the critic).
+
+### UI/UX
+
+- **Settings hydration**: ``ui_settings.json`` is applied immediately after ``st.set_page_config`` and before other session defaults; boolean coercion avoids ``\"false\"`` strings re-enabling multi-query after refresh.
+- **Versioning**: Product chrome reads **Lore Keeper v2.4.1** from `VERSION`.
+
+## [2.4.0] - 2026-04-16
+
+### RAG Engine
+
+- **Answer verbosity**: Immutable rules require detailed, quote-grounded answers when any source shows Rerank **≥ 0.80**; merged LLM context widens the post-merge doc cap when the top rerank crosses that threshold (retrieval/rerank stages unchanged).
+
+### UI/UX
+
+- **Persistent settings**: ``storage/ui_settings.json`` hydrates ``llm_mode``, ``active_model``, ``brain_id``, and ``multi_query_enabled`` on session start (before sidebar widgets) and saves after the sidebar renders.
+- **Brain Vault**: Restored **Brain Name** input and **Create Brain** inside the expander (previously unreachable after ``st.rerun()``).
+- **Versioning**: Product chrome and page title use **LORE KEEPER v2.4.0** from `VERSION`.
+
+## [2.3.10] - 2026-04-16
+
+### RAG Engine
+
+- **Single-query deep retrieval**: Query-Off path uses ``SINGLE_QUERY_DEEP_K = 50`` (else-branch ``k`` only), wide Chroma distance scan for ``1/(1+d)`` similarity, MMR-ordered vector arm, then BM25 + RRF + FlashRank.
+- **Algorithmic priors**: Mechanical-intent queries apply filename-pattern boosts (Handbook/Core) and penalties (Monster/Bestiary/Campaign) on calibrated rerank scores; primary subject absence caps rerank at ``0.15`` (case-insensitive substring).
+- **Similarity backfill**: Pooled chunks with missing dense distance get a conservative non-zero ``similarity_score`` from fused RRF mass so the evidence UI avoids spurious ``0.00``.
+
+### UI/UX
+
+- **Versioning**: Product chrome reads **Lore Keeper v2.3.10** from `VERSION`.
+
+## [2.3.9] - 2026-04-16
+
+### RAG Engine
+
+- **Single-query (Query-Off) bias fix**: When only one query variant runs, optional ``single_query_mode`` rescales pooled ``rrf_score`` by an inferred subject term (×5 whole-word hit, ×0.1 miss) and down-ranks **Monster Manual (2024)** for player-rules wording unless the query clearly targets monsters/stat blocks.
+- **Stricter FlashRank hints**: Single-query path prepends a ``[STRICT_RERANK]`` instruction so the cross-encoder favors passages that explicitly define the asked mechanics.
+- **Forensics**: Single-query path prints ``[DEBUG 2.3.9] Top 3 Raw Hits…`` to the terminal for initial candidate visibility.
+
+### UI/UX
+
+- **Versioning**: Product chrome reads **Lore Keeper v2.3.9** from `VERSION`.
+
+## [2.3.8] - 2026-04-16
+
+### RAG Engine
+
+- **Context–rerank sync**: Final LLM context is built from `_docs_ordered_for_llm` (rerank desc, then similarity); primary chunk is labeled explicitly so the model sees the best passage first.
+- **Citation alignment**: Injected `From …` headers use `_citation_for_top_reranked_doc` (top rerank chunk), replacing excerpt-overlap heuristics that could prefer a weaker page.
+- **Score propagation**: RRF pool metadata merges onto FlashRank wrapper outputs; `similarity_score` is rounded to two decimals with a rerank-derived fallback when Chroma distance is absent.
+- **Perfect-match guidance**: Immutable rules plus an optional context prelude when top rerank ≥ 1.00 instruct the model to treat that chunk as authoritative.
+
+### UI/UX
+
+- **Versioning**: Product chrome reads **Lore Keeper v2.3.8** from `VERSION`.
+
+## [2.3.7] - 2026-04-16
+
+### RAG Engine
+
+- **RRF retrieval**: Replaced weighted `EnsembleRetriever` fusion with Reciprocal Rank Fusion over dense ranks and BM25 ranks; literal ``Multiclassing`` repetition (>2) applies a +30% boost to fused mass so dense PHB rule sections surface ahead of passing mentions.
+- **Identity scores**: Chroma distances are consistently mapped to ``similarity_score = 1/(1+distance)`` on pooled documents so the evidence UI no longer shows a blank ``0.00`` when vector scores were dropped.
+- **Rerank calibration**: Initial pool depth is aligned to 30 candidates; FlashRank inputs use semantic passage tags (rules vs navigation); min–max gamma sharpening widens rerank score separation after the cross-encoder.
+
+### UI/UX
+
+- **Versioning**: Product chrome reads **Lore Keeper v2.3.7** from the `VERSION` file (sidebar header and page title).
+
+## [2.3.6] - 2026-04-16
+
+### RAG Engine
+
+- **Toggle-safe scoring**: Multi-query ON/OFF now shares the same scoreful retrieval pipeline (Chroma distance→similarity, FlashRank rerank, and deterministic `(rerank, similarity)` sorting) to prevent score flatlines.
+- **Prompt toggle state note**: Added a hidden system note carrying the multi-query toggle state to keep retrieval behavior explicit while preserving strict grounding.
+
+### UI/UX
+
+- **State synchronization**: Apply the multi-query toggle to the cached `LoreKeeper` instance at the start of query processing to avoid stale-session wiring.
+
+## [2.3.5] - 2026-04-16
+
+### UI/UX
+
+- **Multi-query toggle**: Added a sidebar switch to enable/disable multi-query expansion without rebuilding the engine (runtime flag applied per session).
+
+image.png## [2.3.4] - 2026-04-16
+
+### RAG Engine
+
+- **Knowledge trust bands**: Replaced strict rerank hard-refusal with a 3-band policy: hard refusal only when top rerank `< 0.05`, soft-warning band for `0.05..0.20`, and normal answering above `0.20`.
+- **Prompt context reinforcement**: Added explicit closed-book prompt reinforcement to extract mechanics from provided official Handbook chunks (including pages `152-153`) when they contain user keywords.
+- **Similarity robustness**: Strengthened Chroma distance-to-similarity mapping propagation for pooled multi-query candidates by adding source+page fallback matching.
+
+### UI/UX
+
+- **Soft warning rendering**: Added UI support for low-confidence soft-warning prefix handling so warning text is shown as `st.warning` while keeping the answer body clean.
+
+## [2.3.3] - 2026-04-16
+
+### RAG Engine
+
+- **Flatline scoring fix**: Replaced relevance extraction with raw Chroma `similarity_search_with_score` distance capture and converted distances into normalized similarity scores (`0..1`, higher is better).
+- **Reranker audit path**: Added direct FlashRank `Ranker.rerank(query, passages)` execution with raw output logging, flatline-score detection, and deterministic fallback behavior.
+- **Stable ranking contract**: Enforced explicit final sorting by `rerank_score` with `similarity_score` tie-breakers before context assembly.
+
+### UI/UX
+
+- **Forensic score reliability**: Fixed score propagation/rendering so Verified Sources always display real `[Score | Rerank]` values sourced from document metadata.
+
+## [2.3.2] - 2026-04-16
+
+### RAG Engine
+
+- **Rerank-order audit fix**: Final merged context chunks are now explicitly sorted by rerank score before prompt assembly, ensuring FlashRank order is preserved end-to-end.
+- **Page 100 investigation hardening**: Kept raw `Page 100` chunk dumps and added global-noise suppression for chunks that repeatedly appear across query types.
+
+### UI/UX
+
+- **Verified Sources forensic view fix**: Fixed citation-page regex parsing so score metadata survives grouping, sorted source cards by rerank/similarity, and rendered scores after page labels as `[Score: 0.xx | Rerank: 0.xx]`.
+
+## [2.3.1] - 2026-04-16
+
+### RAG Engine
+
+- **Forensic scores + hard refusal**: Surface Chroma similarity + FlashRank rerank scores per source and hard-refuse when top rerank `< 0.25` to avoid answering on low-relevance context.
+- **Page 100 bias logging**: Temporarily dump raw retrieved chunk text for viewer `Page 100` to logs for diagnosing hidden noise inflating retrieval.
+
+### UI/UX
+
+- **Verified Sources score display**: Show `[Score: 0.xx | Rerank: 0.xx]` alongside each citation (while keeping consecutive-page grouping).
+
+## [2.3.0] - 2026-04-16
+
+### RAG Engine
+
+- **MMR + multi-query anti index-trap**: Switched dense Chroma retrieval to `search_type="mmr"` (20-candidate pool, `lambda_mult=0.5`) and added LLM-driven 3-variant query expansion with pooled reranking.
+- **Index killer + definition bias**: Added an `is_index_chunk` down-weight multiplier and a definition-like boost so explain/how-to queries prefer explanatory rule text over index/reference lists.
+
+### UI/UX
+
+- **Verified Sources grouping**: Consecutive pages from the same PDF now collapse into a single `Pages X–Y` citation to reduce evidence-panel clutter.
+
+## [2.2.5] - 2026-04-16
+
+### RAG Engine
+
+- **Strict context grounding**: Upgraded the hidden critic to enforce quote-check verification and added a deterministic page-number audit (invented page references trigger `DATA_MISMATCH` failures).
+- **Retrieval confidence gate**: Weak/short retrieved context now forces a “details missing from my current scrolls” response instead of filling gaps.
+- **Closed-book prompt lockdown**: System prompt now forbids using internal training data to explain mechanics; answers must be limited to retrieved context.
+
+### UI/UX
+
+- **Version label**: UI header now displays `Lore Keeper v2.2.5`.
+
+## [2.2.4] - 2026-04-16
+
+### RAG Engine
+
+- **No-meta output sanitization**: Prevent hidden critic/repair loop narration from leaking into the final answer by tightening the repair prompt and stripping common meta-talk phrases deterministically.
+- **Attribution cleanup**: Make in-text source attribution authoritative and overwrite any mismatched leading “According to …” lines so the selected verified citation always wins.
+
+## [2.2.3] - 2026-04-16
+
+### RAG Engine
+
+- **Lore Intent Check**: Added a micro yes/no intent check to override rare domain-classifier false negatives so valid D&D queries can answer from general archives when no scrolls are retrieved.
+
+### UI/UX
+
+- **Refresh-safe chat history**: Fixed session boot logic so `chat_history.json` is actually loaded on new browser sessions (refresh no longer wipes the conversation view).
+
+## [2.2.2] - 2026-04-16
+
+### RAG Engine
+
+- **In-text source attribution**: Inject the most relevant verified source citation into the assistant answer body (repairs the “context from ,” blank and avoids always choosing the first source card).
+
+## [2.2.1] - 2026-04-16
+
+### RAG Engine
+
+- **Common-lore disclaimer correctness**: Prevent the “I couldn't find the exact scroll…” prefix from appearing when verified source chunks exist (prompt rule tightened + runtime stripping in both normal and streaming paths).
+
+## [2.2.0] - 2026-04-16
+
+### UI/UX
+
+- **Bottom-aligned suggestions row**: Moved the 3 suggestion “bubbles” to the bottom of the page, directly above the chat input, for consistent access during conversations.
+- **Inline refresh placement**: Placed the refresh button on the far right of the same suggestion row to keep the layout compact and predictable.
+
+## [2.1.9] - 2026-04-16
+
+### UI/UX
+
+- **Sticky suggestions**: Suggestion “bubbles” now remain visible throughout the session (not just empty chat) and always show 3 prompts at a time.
+- **Refresh suggestions**: Added a refresh button that randomly selects 3 prompts from a 10-question pool (3 existing + 7 new).
+- **Mid-gate cleanup**: The Send/Cancel draft bar no longer renders while an assistant response is pending, so it disappears immediately after Send.
+
+## [2.1.8] - 2026-04-16
+
+### UI/UX
+
+- **History/response containers**: Split chat rendering into `history_container` + `response_container` so history always hydrates first and live “Retrieving…” output always renders at the bottom.
+- **Sidebar flicker reduction**: Moved custom CSS injection to the top of the script (immediately after `st.set_page_config`) and eliminated late-run CSS application to stabilize sidebar hydration.
+- **State hydration guard**: Initialized required `st.session_state` keys early (messages + pending queues) to prevent rerun-order glitches.
+
+## [2.1.7] - 2026-04-16
+
+### UI/UX
+
+- **Chat synchronization fix**: Made `st.session_state.messages` the single source of truth; user submissions now enqueue a pending assistant run and rerender, preventing duplicate history rendering and out-of-order spinners.
+- **Spinner placement**: Assistant “Retrieving…”/thinking indicators now render only after the full chat history pass, ensuring they always appear as the last element.
+- **Clear conversation hard reset**: Clearing chat now also wipes pending queued queries so stale state can’t leak into the next rerun.
+
+## [2.1.6] - 2026-04-16
+
+### RAG Engine
+
+- **Threshold recalibration**: Lowered the retrieval similarity rejection floor from `0.45` → `0.32` to reduce false negatives on short/proper-noun queries (e.g., magic item names).
+- **Hybrid proper-noun boost**: Defaulted hybrid weights to a neutral blend and dynamically boosts BM25 to `0.7` (Vector `0.3`) when queries contain capitalized proper nouns.
+- **Soft reject for missing scrolls**: Out-of-domain queries remain hard-rejected, but in-domain queries with no retrieved sources now produce a “common lore” answer with an explicit disclaimer prefix.
+
+## [2.1.5] - 2026-04-16
+
+### UI/UX
+
+- **Sidebar CSS sanitization**: Removed overly-broad font overrides that broke Streamlit icon fonts and widget sizing; added targeted spacing rules to prevent overlap in expanders and buttons.
+- **Status header stabilization**: Rebuilt sidebar metadata header as a compact vertical list (no wrapping) to keep alignment stable across widths.
+- **Layout guardrails**: Set a wider sidebar baseline and restored Material icon rendering so expander arrows and icons don’t degrade into raw text labels.
+
+## [2.1.4] - 2026-04-16
+
+### UI/UX
+
+- **Sidebar typography refresh**: Increased sidebar font size and switched to a modern sans-serif stack (Inter/Segoe UI) with improved line spacing for legibility.
+- **Status density, no badges**: Replaced pill/badge status bubbles with a minimalist text status block (Status/Version/Engine/GPU/Brain/Filter/Mode) to reduce visual noise.
+- **Collapsed control panels**: Moved Brain Vault and Model controls into collapsed expanders; relocated **Clear Conversation** into **Danger Zone** above **Destroy Brain** for safer, cleaner operations.
+
+## [2.1.3] - 2026-04-16
+
+### RAG Engine
+
+- **Strict Domain Guardrail**: Added an in-domain router + hardened Archivist system prompt to refuse real-world advice/general chat and enforce “The archives are silent on this matter” when context does not support an answer.
+- **Retrieval threshold short-circuit**: If top Chroma similarity falls below `0.45`, the pipeline bypasses the LLM and returns a predefined out-of-lore response, logging `GuardrailTriggered=True`.
+- **Verdict defensive default**: Hidden-critic verdict parsing now defaults to a reject/fail path on malformed payloads instead of silently passing, ensuring one bounded repair attempt rather than unchecked acceptance.
+
 ## [2.1.2] - 2026-04-16
 
 ### RAG Engine
