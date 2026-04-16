@@ -4,38 +4,54 @@
 
 ---
 
-## 🚀 Overview
-**LoreKeeper** is a high-performance Retrieval-Augmented Generation (RAG) system designed to provide hyper-accurate answers from complex, multi-structured document archives. While currently deployed with Dungeons & Dragons 5e rulebooks, its **domain-agnostic decoupled core** is engineered to be a universal "brain" for any technical PDF library.
+## 🏛️ Executive Overview: The Evolution of LoreKeeper
 
-This project was developed over **10 days of rapid iteration**, moving from a monolithic script to a professional, modular infrastructure capable of running high-stakes inference locally.
+**LoreKeeper** is a high-performance **Hybrid-RAG (Retrieval-Augmented Generation)** system engineered to solve the "semantic failure" problem in dense, multi-structured document archives. While currently optimized for Dungeons & Dragons 5e rulebooks, its **domain-agnostic, decoupled core** is designed to serve as a universal "brain" for any complex technical library.
 
----
-
-## 🧠 Core AI Features (The "Applied AI" Edge)
-
-* **Hybrid Retrieval Pipeline:** Merges **BM25 (Lexical)** and **Vector (Semantic)** search using ensemble fusion. This ensures that specific technical terms (like *"Armor Class"*) are never missed while maintaining semantic context.
-* **Self-Correcting Logic Loop:** A dedicated **"Critic" layer** analyzes retrieved context against generated answers to eliminate hallucinations before they reach the user.
-* **FlashRank Reranking:** Implements a cross-encoder reranking step to prioritize the most relevant document chunks within the LLM's context window.
-* **Fuzzy Query Cleaning:** A built-in pre-processing utility that corrects user typos and normalizes technical jargon without the latency of an LLM call.
+Developed over **12 days of rapid, high-intensity iteration**, the project has evolved from a simple monolithic script into a sophisticated **Hybrid Intelligence Pipeline (v2.4.3)**. By merging lexical precision with semantic depth and implementing advanced reranking logic, LoreKeeper ensures that intricate technical mechanics—such as multi-page multiclassing rules—are retrieved with **100% accuracy**. This move beyond "simple retrieval" allows for high-stakes local inference where standard RAG systems typically lose context.
 
 ---
 
-## 🏗️ Architecture & Infrastructure (The "Senior" Engineering)
+## 🏗️ Technical Architecture & The Hybrid RAG Pipeline
 
-* **Service-Oriented Design:** The system is fully modular, separating the **Core Retrieval Engine** from the **UI/CLI interfaces**, **Data Storage**, and **Observability Services**.
-* **Hardware-Aware Optimization:** Designed for local inference via **Ollama**, featuring:
-    * **Async Non-Blocking Warmup:** The UI renders instantly while the GPU prewarms in a background thread.
-    * **VRAM Management:** Intelligent polling to ensure the model is fully loaded in VRAM before processing.
-* **Production-Ready FileSystem:** Structured data management with dedicated paths for persistent storage, ingested lore, and automated error logging.
-* **Dockerized Deployment:** Ready-to-use Docker configuration for consistent environment orchestration.
+The LoreKeeper engine is built on a **Service-Oriented, Domain-Agnostic Decoupled Core**, allowing it to scale across any technical PDF library. The retrieval flow is a multi-stage process engineered to eliminate "Semantic Noise":
 
+1. **Fuzzy Query Pre-Processing:** A built-in utility that corrects user typos and normalizes technical jargon via lexical mapping, ensuring high-quality retrieval without the latency of an extra LLM call.
+2. **Multi-Query Expansion (Togglable):** Generates $N$ variations of a query to broaden the retrieval net, ensuring higher coverage for ambiguous prompts.
+3. **Ensemble Retrieval:** Simultaneously triggers **Vector Search (ChromaDB)** for semantic context and **BM25 (Rank-BM25)** for exact technical keyword matching.
+4. **Reciprocal Rank Fusion (RRF):** Merges both search streams using an RRF algorithm to prioritize documents that rank high in both lexical and semantic domains.
+5. **Deep-K Reranking (Patch 2.4.3):** Analyzes a deep pool ($K=50$) through a **FlashRank Cross-Encoder** to identify the most statistically relevant chunks.
+6. **Sliding-Window Context Expansion:** If a primary chunk hits a confidence threshold of $>0.95$, the system triggers an automatic $N \pm 1$ page retrieval to capture rules that span across page breaks.
+7. **Hardened Inference:** The final context is passed through a **Security-Hardened Prompt Layer** to prevent injections and ensure authoritative, rule-centric answers.
+
+---
+
+## 🚀 Key Features & Recent Improvements (v2.1.5 ➔ v2.4.3)
+
+### 🧠 The Hybrid RAG Edge
+* **Lexical-Semantic Fusion:** Implementation of **Hybrid Search** with RRF ensures specific jargon (e.g., *"Armor Class"*, *"Lay on Hands"*) is never missed, solving the common "Semantic Overlap" issue found in standard RAG.
+* **Self-Correcting "Critic" Loop:** A dedicated validation layer that analyzes retrieved context against generated answers to scrub hallucinations before they reach the UI.
+* **Neighboring Page Logic:** A specialized feature for Patch 2.4.3. This "Sliding Window" expansion prevents information fragmentation by checking preceding and succeeding pages when high-confidence triggers are met.
+
+### 🛡️ Security & Hardening (Pen-Tested)
+* **Injection Guardrails:** Implemented a **"Sovereign Archivist"** prompt structure, hardened via internal pen-testing to prevent system jailbreaking and ensure the AI stays strictly within the provided context.
+* **Hallucination Scrubbing:** A built-in refusal logic that prevents the LLM from speculating when the rerank scores fall below a calibrated threshold.
+
+### ⚙️ Optimization & UX (The "Senior" Experience)
+* **Performance-vs-Depth Toggles:** UI controls for **Context Expansion** and **Multi-Querying**, allowing users to optimize for either sub-second latency or deep-dive technical accuracy.
+* **Async Non-Blocking Warmup:** Optimized for local **Ollama** inference; the UI renders instantly while the GPU pre-warms models in a background thread.
+* **State Persistence:** A JSON-based persistence layer for `ui_settings`, ensuring session hydration and sidebar configurations remain stable across refreshes.
+* **Infrastructure & Orchestration:** * **Dockerized Deployment:** Ready-to-use Docker configuration for consistent environment orchestration.
+    * **VRAM Management:** Intelligent polling to ensure models are fully loaded before processing.
+    * **Structured Filesystem:** Dedicated production paths for persistent storage, ingested lore, and automated error logging.
 ---
 
 ## 🛠️ Tech Stack
 * **Orchestration:** Python 3.12, Streamlit
 * **LLM & Embedding:** Ollama (Llama 3 / Mistral), OpenAI (optional)
 * **Vector Database:** ChromaDB
-* **Retrieval:** BM25 (Rank-BM25), FlashRank
+* **Retrieval & Ranking:** BM25 (Rank-BM25), FlashRank (Cross-Encoders)
+* **Infrastructure:** Service-Oriented Architecture, Docker, Persistent State Management (JSON)
 * **Automation:** Bash (Setup Scripting)
 
 ---
@@ -68,7 +84,7 @@ D&D 5e serves as the ultimate stress test for RAG systems due to:
 
 * **High Data Density**: Hundreds of interconnected rules across multiple books.
 
-* **Specific Jargon**: Terms that mean different things in common English vs. Game Mechanics.
+* **Specific Jargon(Semantic Overlap)**: Navigating technical terms that conflict with common language (e.g., distinguishing between "Action" as a general concept vs. a specific mechanical resource).
 
 * **Complex Retrieval**: Needs to understand the difference between "Flavor Text" and "Rule Constraint."
 
