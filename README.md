@@ -12,7 +12,65 @@ Developed over **12 days of rapid, high-intensity iteration**, the project has e
 
 ---
 
-## 🏗️ Technical Architecture & The Hybrid RAG Pipeline
+## 🏗️ Technical Architecture
+
+The LoreKeeper engine is built on a **Service-Oriented, Domain-Agnostic Core**, allowing it to scale across any technical PDF library. The system is designed to be fully decoupled, separating state management from the inference engine.
+
+<details>
+<summary><b>🔍 Click to expand Architecture Diagram</b></summary>
+
+```mermaid
+graph TD
+    subgraph UI_Layer [Frontend - Streamlit]
+        A[User Input / Question] --> B[UI Settings: Multi-Query, Context Expansion]
+        B --> C[App Coordinator - app.py]
+    end
+
+    subgraph Orchestration [Orchestration Layer - LoreKeeper.py]
+        C --> D{Input Guardrails}
+        D -- Fail --> E[Auto-Fail Response / Disclaimer]
+        D -- Pass --> F[Query Processor]
+    end
+
+    subgraph Retrieval_Engine [Hybrid RAG Pipeline - Retrieval.py]
+        F --> G[Multi-Query Expansion]
+        G --> H[Hybrid Search: BM25 + Vector]
+        H --> I[Reciprocal Rank Fusion - RRF]
+        I --> J[FlashRank Reranking]
+        J --> K{Confidence Threshold > 0.95}
+        K -- Yes --> L[Sliding Window: N±1 Page Expansion]
+        K -- No --> M[Standard Context]
+    end
+
+    subgraph Critique_Loop [Agentic Critique Layer]
+        L & M --> N[LLM Generation - Ollama]
+        N --> O{AI Judge: Accuracy Check}
+        O -- Fail < 2 --> P[Self-Correction / Re-edit]
+        P --> N
+        O -- Fail > 2 --> Q[Final Response + Disclaimer]
+        O -- Pass --> R[Verified Response + Sources]
+    end
+
+    subgraph Infrastructure [Data & Compute]
+        S[(Vector DB: ChromaDB)] -.-> H
+        T[(JSON: Session State)] -.-> B
+        U[[Ollama - Local Inference]] -.-> N
+        V[[Hardware Handshake: CUDA/MPS]] -.-> U
+    end
+
+    style UI_Layer fill:#f9f,stroke:#333,stroke-width:2px
+    style Orchestration fill:#bbf,stroke:#333,stroke-width:2px
+    style Retrieval_Engine fill:#bfb,stroke:#333,stroke-width:2px
+    style Critique_Loop fill:#fbb,stroke:#333,stroke-width:2px
+```
+</details>
+
+### 🔍 Why this Architecture?
+The system utilizes an **Agentic Critique Layer** to cross-reference generated answers against retrieved context, drastically reducing hallucinations. The **Hybrid RAG Pipeline** ensures that technical jargon (lexical) and intent (semantic) are both captured, while the **Hardware Handshake** ensures optimal performance across NVIDIA, Apple Silicon, and CPU environments.
+
+---
+
+## The Hybrid RAG Pipeline Engine
 
 The LoreKeeper engine is built on a **Service-Oriented, Domain-Agnostic Decoupled Core**, allowing it to scale across any technical PDF library. The retrieval flow is a multi-stage process engineered to eliminate "Semantic Noise":
 
