@@ -70,7 +70,7 @@ The system utilizes an **Agentic Critique Layer** to cross-reference generated a
 
 ---
 
-## The Hybrid RAG Pipeline Engine
+## The Hybrid RAG Pipeline
 
 The LoreKeeper engine is built on a **Service-Oriented, Domain-Agnostic Decoupled Core**, allowing it to scale across any technical PDF library. The retrieval flow is a multi-stage process engineered to eliminate "Semantic Noise":
 
