@@ -147,4 +147,4 @@ D&D 5e serves as the ultimate stress test for RAG systems due to:
 ## **📜 License**
 Distributed under the **MIT License**. See [LICENSE](https://github.com/AsafNachman/LoreKeeper-DND-Hybrid-RAG-Core/blob/main/License) for more information.
 
-**Contact**: Asaf Nachman - Computer Science Student (97 GPA) | Applied AI & AI Infrastructure Enthusiast.
+**Contact**: Asaf Nachman - Computer Science Student (98.4 GPA) | AI Software Engineer | Former Software Developer, IDF Technical Unit
