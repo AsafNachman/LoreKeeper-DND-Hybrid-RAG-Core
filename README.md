@@ -71,8 +71,9 @@ graph TD
 
 ## 🧠 The Hybrid Retrieval Pipeline (Deep Dive)
 To eliminate "Semantic Noise" and ensure absolute precision, LoreKeeper executes a deterministic 4-stage pipeline:
+* **Multi-Query Expansion:** LoreKeeper doesn't just search your question; it generates $N$ variations to ensure that even ambiguous prompts find their mark in the documentation.
 * **Fuzzy Query Normalization:** A built-in pre-processing utility that corrects user typos and normalizes technical jargon via lexical mapping, ensuring high-quality retrieval without LLM latency.
-* **Hybrid Ensemble Search:** Simultaneously triggers Vector Search (ChromaDB) for semantic intent and BM25 (Rank-BM25) for exact technical keyword matching.
+* **Hybrid Ensemble Search:** Simultaneously triggers Vector Search (**ChromaDB**) for semantic intent and **BM25** (Rank-BM25) for exact technical keyword matching.
 * **RRF Fusion & FlashRank Reranking:** Merges both streams into a unified ranked list and passes the top candidates through FlashRank (Cross-Encoders) to prioritize instructional mechanics over flavor prose.
 * **Sliding-Window Context Expansion:** If the primary result hits a $\text{confidence threshold} > 0.95$, the system dynamically injects $N \pm 1$ neighboring pages to capture rules that span across page breaks.
 
